@@ -1,0 +1,45 @@
+{
+  "files": {
+    "code": [
+      "postcss.config.js",
+      "src/App.tsx",
+      "src/main.tsx",
+      "tailwind.config.js",
+      "vite.config.ts"
+    ],
+    "document": [
+      "CLAUDE.md",
+      "README.md",
+      "index.html"
+    ],
+    "paper": [],
+    "image": [
+      "public/favicon.svg",
+      "public/icons.svg",
+      "src/assets/hero.png",
+      "src/assets/react.svg",
+      "src/assets/vite.svg"
+    ],
+    "video": []
+  },
+  "total_files": 13,
+  "total_words": 2426,
+  "needs_graph": false,
+  "warning": "Corpus is ~2,426 words - fits in a single context window. You may not need a graph.",
+  "skipped_sensitive": [],
+  "graphifyignore_patterns": 20,
+  "scope": {
+    "requested_mode": "all",
+    "resolved_mode": "all",
+    "source": "configured-default",
+    "root": ".",
+    "candidate_count": null,
+    "included_count": 13,
+    "excluded_untracked_count": 0,
+    "excluded_ignored_count": 0,
+    "excluded_sensitive_count": 0,
+    "missing_committed_count": 0,
+    "warnings": [],
+    "recommendation": null
+  }
+}
