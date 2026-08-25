@@ -1,6 +1,6 @@
 // Thin wrapper around the browser's geolocation watch API. Kept separate from the trip-progress
 // math in useTripProgress so the "do we have a GPS fix" concern never tangles with "where on the
-// route is that fix" — a phone that denies permission should still show a clear, specific reason.
+// route is that fix". A phone that denies permission should still show a clear, specific reason.
 
 import { useCallback, useEffect, useRef, useState } from "react"
 
@@ -60,7 +60,7 @@ export function useGeolocation(): UseGeolocationResult {
     watchIdRef.current = id
   }, [])
 
-  // Stop watching if the commuter navigates away mid-trip — a dangling watch would keep draining
+  // Stop watching if the commuter navigates away mid-trip. A dangling watch would keep draining
   // battery for a screen that's no longer showing any of this.
   useEffect(() => {
     return () => {

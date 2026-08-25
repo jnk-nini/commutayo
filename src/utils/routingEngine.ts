@@ -1,35 +1,61 @@
 // Deterministic, weighted Dijkstra routing engine for the CommuTayo Cavite pilot corridor.
 // Source data: docs/cavite-network.md (Aguinaldo Highway corridor spec).
 
+import { computeFare, type VehicleClass } from "@/utils/fares"
+import { haversineMeters } from "@/utils/geo"
+
 export type TransitMode = "jeepney" | "bus" | "uv_express" | "tricycle" | "walk"
 
 export interface TransitNode {
   id: string
   name: string
+  /** Short label for pickers and pins, where the full name does not fit on a phone. */
+  shortName: string
   lat: number
   lng: number
   city: string
   isTerminal: boolean
+  /**
+   * Nicknames a commuter would actually type or say. Lives on the node, not in the search
+   * component, so the search box and the network can never disagree about what "Rob Pala-Pala"
+   * means.
+   */
+  aliases: string[]
+  /** Exactly where to stand while waiting here. Answers "saan ako tatayo?" before any ride starts. */
+  waitingSpot: string
 }
 
 export interface RouteSegmentEdge {
   fromNodeId: string
   toNodeId: string
   mode: TransitMode
+  /** Fare bracket for this vehicle. Finer than `mode`: modern jeeps cost ₱2 more than traditional. */
+  vehicleClass: VehicleClass
   /**
    * The physical service (one jeepney/bus route) this segment belongs to. Consecutive segments
    * sharing a serviceId are the same vehicle staying on the road, so they merge into one ride and
    * cost no transfer; a different serviceId means the commuter gets off and boards again.
    *
    * The seed graph gives every segment its own serviceId, because docs/cavite-network.md doesn't
-   * record which routes run through. That's the conservative reading — it never promises a
+   * record which routes run through. That's the conservative reading: it never promises a
    * through-ride that doesn't exist. Once real route data lands, give the segments of one route a
    * shared serviceId and they merge automatically.
    */
   serviceId: string
-  signboard: string
+  /**
+   * What is actually painted on the vehicle's acrylic signboard or windshield, in the direction
+   * this segment travels. This is the thing a commuter scans a moving road for, so it is required
+   * on every segment.
+   */
+  placardText: string
+  /** Other boards that also serve this leg. Any of them is the right vehicle to flag down. */
+  alternatePlacards: string[]
+  /** Where to stand while waiting for this vehicle, copied from the boarding node. */
+  boardingSpot: string
   fare: number
   durationMin: number
+  /** Road distance in meters, from OSRM. Drives both the fare and the clock. */
+  distanceMeters: number
   landmarkCues: string[]
   driverPhrase: string
   /** True when the phrase and cues come from docs/cavite-network.md; false when inferred. */
@@ -40,12 +66,17 @@ export interface RouteSegmentEdge {
 
 export interface RouteStep {
   mode: TransitMode
+  vehicleClass: VehicleClass
   serviceId: string
   from: string
   to: string
   /** Stops passed through when consecutive segments merged into one ride. Empty for single hops. */
   viaStops: string[]
-  signboard: string
+  /** The vehicle's signboard text for this leg. See `RouteSegmentEdge.placardText`. */
+  placardText: string
+  alternatePlacards: string[]
+  /** Where to stand and wait before boarding this leg. */
+  boardingSpot: string
   driverPhrase: string
   /** Landmark cues for the drop-off point. */
   landmarkCues: string[]
@@ -53,6 +84,7 @@ export interface RouteStep {
   landmark: string
   fare: number
   durationMin: number
+  distanceMeters: number
   landmarkVerified: boolean
   /** [lat, lng] points tracing this step alone, boarding point through drop-off. */
   path: [number, number][]
@@ -85,48 +117,140 @@ export interface TransitNetwork {
 // Seed graph: Aguinaldo Highway pilot corridor
 // ---------------------------------------------------------------------------
 
+// Coordinates are the transit bay or pedestrian entrance a commuter actually stands at, not the
+// centroid of the property. A mall centroid puts the pin in the middle of a building; the waiting
+// shed is what someone walking with a phone needs to find.
 export const CAVITE_PILOT_NODES: TransitNode[] = [
-  { id: "st-dominic", name: "St. Dominic (Bacoor)", lat: 14.4503, lng: 120.9492, city: "Bacoor", isTerminal: true },
-  { id: "imus-lumina", name: "Imus Lumina / Robinsons Imus", lat: 14.4267, lng: 120.9388, city: "Imus", isTerminal: false },
-  { id: "robinsons-dasma", name: "Robinsons Place Dasmariñas", lat: 14.3312, lng: 120.9575, city: "Dasmariñas", isTerminal: false },
-  { id: "sm-dasma", name: "SM City Dasmariñas", lat: 14.3218, lng: 120.9634, city: "Dasmariñas", isTerminal: false },
-  { id: "pala-pala", name: "Pala-Pala Terminal", lat: 14.3167, lng: 120.965, city: "Dasmariñas", isTerminal: true },
-  { id: "lpu-gentri", name: "LPU Cavite (General Trias)", lat: 14.3056, lng: 120.8992, city: "General Trias", isTerminal: true },
-  { id: "silang-premier", name: "Silang Premier", lat: 14.2341, lng: 120.9744, city: "Silang", isTerminal: true },
+  {
+    id: "st-dominic",
+    name: "St. Dominic (Bacoor Longos)",
+    shortName: "St. Dominic",
+    lat: 14.4682,
+    lng: 120.9634,
+    city: "Bacoor",
+    isTerminal: true,
+    aliases: ["st dominic", "st. dominic", "saint dominic", "dominic", "bacoor", "longos", "bacoor longos"],
+    waitingSpot: "Sa waiting shed tapat ng St. Dominic Savio Parish, sa southbound na gilid ng Aguinaldo Highway.",
+  },
+  {
+    id: "imus-lumina",
+    name: "Imus Lumina / Robinsons Imus",
+    shortName: "Imus Lumina",
+    lat: 14.4267,
+    lng: 120.9405,
+    city: "Imus",
+    isTerminal: false,
+    aliases: ["imus lumina", "robinsons imus", "rob imus", "lumina", "imus", "tanzang luma"],
+    waitingSpot: "Sa ilalim ng Lumina overpass, tapat mismo ng entrance ng Robinsons Imus.",
+  },
+  {
+    id: "robinsons-dasma",
+    name: "Robinsons Place Dasmariñas",
+    shortName: "Robinsons Dasma",
+    lat: 14.3312,
+    lng: 120.9575,
+    city: "Dasmariñas",
+    isTerminal: false,
+    aliases: [
+      "robinsons place dasmarinas",
+      "robinsons dasmarinas",
+      "robinsons dasma",
+      "rob dasma",
+      "robinsons",
+      "salitran",
+    ],
+    waitingSpot: "Sa loading bay sa gilid ng Robinsons Place Dasmariñas, harap ng Aguinaldo Highway.",
+  },
+  {
+    id: "sm-dasma",
+    name: "SM City Dasmariñas",
+    shortName: "SM Dasma",
+    lat: 14.3005,
+    lng: 120.9576,
+    city: "Dasmariñas",
+    isTerminal: false,
+    aliases: ["sm city dasmarinas", "sm dasmarinas", "sm dasma", "sm", "hypermarket"],
+    waitingSpot: "Sa main waiting shed ng SM City Dasmariñas, sa overpass tapat ng Hypermarket.",
+  },
+  {
+    id: "pala-pala",
+    name: "Pala-Pala Terminal",
+    shortName: "Pala-Pala",
+    lat: 14.2982,
+    lng: 120.9568,
+    city: "Dasmariñas",
+    isTerminal: true,
+    aliases: ["pala-pala", "pala pala", "palapala", "rob pala-pala", "rob pala pala", "dasma bayan"],
+    waitingSpot: "Sa loob ng Pala-Pala terminal, sa hanay ng mga sasakyang papuntang General Trias.",
+  },
+  {
+    id: "lpu-gentri",
+    name: "LPU Cavite (General Trias)",
+    shortName: "LPU Cavite",
+    lat: 14.3168,
+    lng: 120.9254,
+    city: "General Trias",
+    isTerminal: true,
+    aliases: ["lpu cavite", "lpu gentri", "lpu gate", "general trias", "gen trias", "gentri", "lpu", "manggahan"],
+    waitingSpot: "Sa tapat mismo ng LPU main gate sa Governor's Drive, katabi ng jeepney stand.",
+  },
+  {
+    id: "silang-premier",
+    name: "Silang Premier",
+    shortName: "Silang",
+    lat: 14.2341,
+    lng: 120.9744,
+    city: "Silang",
+    isTerminal: true,
+    aliases: ["silang premier", "silang", "silang bayan"],
+    waitingSpot: "Sa waiting shed tapat ng Silang Premier outlet, sa southbound na gilid.",
+  },
 ]
 
 const NODE_COORDS = new Map<string, [number, number]>(CAVITE_PILOT_NODES.map((n) => [n.id, [n.lat, n.lng]]))
 
-// Real road geometry for each stop pair, fetched once from OSRM's public routing API (driving
-// profile, simplified with Ramer-Douglas-Peucker) and baked in here so the map draws roads instead
-// of straight lines, with no runtime network dependency. Keyed by "fromId|toId"; the reverse
-// direction is this array reversed at lookup time. Re-fetch and re-paste if the seed node
-// coordinates ever change.
-const ROAD_PATHS: Record<string, [number, number][]> = {
-  "st-dominic|imus-lumina": [[14.450302,120.949189],[14.449971,120.949146],[14.449724,120.949422],[14.449687,120.949631],[14.449522,120.949648],[14.4485,120.949522],[14.446908,120.948966],[14.446202,120.948921],[14.445307,120.952837],[14.444071,120.952319],[14.422649,120.94216],[14.426463,120.938417],[14.426522,120.938478]],
-  "imus-lumina|robinsons-dasma": [[14.426522,120.938478],[14.426463,120.938417],[14.422595,120.942131],[14.420855,120.941353],[14.419546,120.941087],[14.350405,120.937656],[14.350675,120.942286],[14.351403,120.943825],[14.351401,120.944181],[14.351018,120.944661],[14.350676,120.944831],[14.349982,120.944744],[14.349104,120.944982],[14.340292,120.948611],[14.331079,120.956681],[14.332063,120.957873],[14.331849,120.958049],[14.3313,120.957409]],
-  "robinsons-dasma|sm-dasma": [[14.3313,120.957409],[14.331099,120.957231],[14.330468,120.957781],[14.330209,120.95744],[14.323423,120.963397],[14.320445,120.96378],[14.320432,120.963626],[14.321357,120.963521],[14.321341,120.963357],[14.321623,120.963415],[14.321951,120.963298],[14.321786,120.963243]],
-  "sm-dasma|pala-pala": [[14.321786,120.963243],[14.322517,120.96325],[14.322538,120.963553],[14.318585,120.964003],[14.316433,120.964908],[14.316498,120.965085],[14.316701,120.965002]],
-  "pala-pala|lpu-gentri": [[14.316701,120.965002],[14.317343,120.96481],[14.317626,120.965541],[14.317777,120.965473],[14.318142,120.966417],[14.318296,120.966369],[14.318214,120.966388],[14.317522,120.964662],[14.317636,120.964483],[14.318587,120.964085],[14.323401,120.963487],[14.32921,120.958436],[14.3286,120.957423],[14.32804,120.955497],[14.327816,120.954081],[14.32692,120.947196],[14.326801,120.940354],[14.3193,120.94243],[14.317735,120.943074],[14.31524,120.945148],[14.307598,120.952314],[14.304133,120.953851],[14.30264,120.953983],[14.301167,120.952945],[14.300026,120.951681],[14.294493,120.941653],[14.293838,120.938763],[14.293582,120.936998],[14.292557,120.934273],[14.291875,120.931405],[14.291619,120.928188],[14.291367,120.926773],[14.292173,120.923303],[14.29223,120.915879],[14.292135,120.911132],[14.29322,120.910566],[14.295504,120.908769],[14.298649,120.906707],[14.3045,120.90319],[14.306404,120.901007],[14.305774,120.900488],[14.305904,120.900214],[14.305869,120.899688],[14.305696,120.89971],[14.30573,120.899401],[14.305587,120.899415],[14.305615,120.899216]],
-  "pala-pala|silang-premier": [[14.316701,120.965002],[14.317343,120.96481],[14.317626,120.965541],[14.317777,120.965473],[14.318262,120.966736],[14.318314,120.967408],[14.317836,120.967421],[14.315366,120.967988],[14.314481,120.965707],[14.310962,120.96722],[14.30662,120.970589],[14.304056,120.9764],[14.303271,120.977065],[14.301574,120.977865],[14.301276,120.978136],[14.299513,120.981214],[14.299321,120.981344],[14.298416,120.98119],[14.296729,120.979933],[14.295862,120.979452],[14.295488,120.979548],[14.294655,120.980814],[14.294361,120.980897],[14.293427,120.980833],[14.292665,120.980481],[14.292242,120.980506],[14.291744,120.980197],[14.29114,120.980504],[14.290555,120.980403],[14.29063,120.975641],[14.290772,120.974615],[14.291485,120.973309],[14.293358,120.971992],[14.293506,120.971635],[14.293444,120.97051],[14.292862,120.970468],[14.292496,120.970307],[14.290182,120.967785],[14.289619,120.965714],[14.288253,120.963582],[14.287901,120.961671],[14.287265,120.960288],[14.287082,120.959332],[14.284766,120.959622],[14.284269,120.959799],[14.277298,120.964474],[14.273368,120.965615],[14.269472,120.967467],[14.262747,120.969102],[14.261443,120.969574],[14.259218,120.970756],[14.254926,120.97443],[14.254003,120.97513],[14.253488,120.975355],[14.251918,120.975524],[14.245119,120.975693],[14.24174,120.975933],[14.238412,120.97633],[14.235713,120.976338],[14.235708,120.975791],[14.23422,120.975784],[14.234118,120.974399]],
-  "st-dominic|sm-dasma": [[14.450302,120.949189],[14.449971,120.949146],[14.449724,120.949422],[14.449687,120.949631],[14.449522,120.949648],[14.4485,120.949522],[14.446908,120.948966],[14.446202,120.948921],[14.445307,120.952837],[14.421428,120.941584],[14.419873,120.941118],[14.350405,120.937656],[14.350675,120.942286],[14.351403,120.943825],[14.351401,120.944181],[14.351018,120.944661],[14.350676,120.944831],[14.349982,120.944744],[14.349104,120.944982],[14.340292,120.948611],[14.323493,120.963347],[14.32314,120.963493],[14.320445,120.96378],[14.320432,120.963626],[14.321357,120.963521],[14.321341,120.963357],[14.321623,120.963415],[14.321951,120.963298],[14.321786,120.963243]],
+interface RoadSegment {
+  /** Road distance in meters, straight from OSRM. */
+  distanceMeters: number
+  /** [lat, lng] following the actual road, first and last points pinned to the stop coordinates. */
+  path: [number, number][]
 }
 
-/** Looks up the baked road geometry for an edge, direction-aware, with a straight-line fallback so
- *  a future edge that forgets to fetch geometry degrades instead of crashing. */
-function roadPathFor(fromId: string, toId: string): [number, number][] {
-  const forward = ROAD_PATHS[`${fromId}|${toId}`]
+// Real road geometry and road distance for each stop pair, fetched once from OSRM's public routing
+// API (driving profile) and simplified with Ramer-Douglas-Peucker, so the map draws roads instead
+// of straight lines and fares are metered on road kilometers, with no runtime network dependency.
+// Keyed "fromId|toId"; the reverse direction is this path reversed at lookup time.
+//
+// Regenerate with scripts/fetch-roads.mjs whenever a seed node coordinate changes. These were
+// refetched for the corrected transit-bay coordinates above.
+const ROAD_SEGMENTS: Record<string, RoadSegment> = {
+  "st-dominic|imus-lumina": { distanceMeters: 6755, path: [[14.4682,120.9634],[14.468332,120.963607],[14.467596,120.966743],[14.467116,120.967327],[14.465826,120.967934],[14.464591,120.967072],[14.46047,120.960743],[14.459685,120.959878],[14.458824,120.959308],[14.42292,120.9423],[14.427005,120.94134],[14.4267,120.9405]] },
+  "imus-lumina|robinsons-dasma": { distanceMeters: 12293, path: [[14.4267,120.9405],[14.427005,120.94134],[14.42292,120.9423],[14.420855,120.941353],[14.419546,120.941087],[14.350405,120.937656],[14.350675,120.942286],[14.351403,120.943825],[14.351401,120.944181],[14.351018,120.944661],[14.349104,120.944982],[14.340292,120.948611],[14.331079,120.956681],[14.332063,120.957873],[14.331849,120.958049],[14.3312,120.9575]] },
+  "robinsons-dasma|sm-dasma": { distanceMeters: 6520, path: [[14.3312,120.9575],[14.331099,120.957231],[14.330468,120.957781],[14.330209,120.95744],[14.329273,120.958265],[14.329078,120.958191],[14.328646,120.957564],[14.32804,120.955497],[14.32692,120.947196],[14.326751,120.940296],[14.3193,120.94243],[14.317735,120.943074],[14.31524,120.945148],[14.307598,120.952314],[14.304133,120.953851],[14.300736,120.95414],[14.298364,120.955267],[14.298907,120.958437],[14.299263,120.958442],[14.29984,120.957407],[14.300342,120.957709],[14.3005,120.9576]] },
+  "sm-dasma|pala-pala": { distanceMeters: 1504, path: [[14.3005,120.9576],[14.301313,120.958376],[14.30289,120.956188],[14.302892,120.95596],[14.30221,120.955073],[14.301984,120.955081],[14.30166,120.955447],[14.30149,120.955302],[14.302039,120.954727],[14.302159,120.954008],[14.300649,120.954165],[14.298364,120.955267],[14.298607,120.956493],[14.298102,120.956571],[14.2982,120.9568]] },
+  "pala-pala|lpu-gentri": { distanceMeters: 8699, path: [[14.2982,120.9568],[14.298102,120.956571],[14.298633,120.956449],[14.298416,120.955318],[14.300599,120.954299],[14.302166,120.954112],[14.302145,120.953894],[14.301988,120.953534],[14.300968,120.952758],[14.299962,120.951578],[14.294362,120.941301],[14.293582,120.936998],[14.292423,120.933831],[14.291816,120.930986],[14.291369,120.9267],[14.292106,120.923841],[14.295714,120.924594],[14.297444,120.924561],[14.307274,120.921347],[14.3081,120.920668],[14.309683,120.916812],[14.310321,120.916122],[14.311152,120.915833],[14.314756,120.915669],[14.316031,120.915419],[14.317677,120.915585],[14.318015,120.915921],[14.318129,120.916993],[14.318055,120.919859],[14.317549,120.920204],[14.317378,120.920679],[14.317519,120.921043],[14.317921,120.921263],[14.317051,120.924579],[14.316987,120.925588],[14.3168,120.9254]] },
+  "pala-pala|silang-premier": { distanceMeters: 8083, path: [[14.2982,120.9568],[14.298102,120.956571],[14.298633,120.956449],[14.298364,120.955267],[14.295162,120.957273],[14.290716,120.958932],[14.284347,120.95976],[14.277298,120.964474],[14.273368,120.965615],[14.26962,120.967419],[14.262747,120.969102],[14.260007,120.970285],[14.259116,120.970836],[14.254926,120.97443],[14.253488,120.975355],[14.245119,120.975693],[14.238412,120.97633],[14.235713,120.976338],[14.235708,120.975791],[14.23422,120.975784],[14.2341,120.9744]] },
+  "st-dominic|sm-dasma": { distanceMeters: 21164, path: [[14.4682,120.9634],[14.468332,120.963607],[14.467596,120.966743],[14.467116,120.967327],[14.465826,120.967934],[14.464591,120.967072],[14.46047,120.960743],[14.459685,120.959878],[14.458824,120.959308],[14.422558,120.942111],[14.420273,120.941184],[14.338713,120.937071],[14.33691,120.937383],[14.319387,120.942404],[14.317735,120.943074],[14.31524,120.945148],[14.307598,120.952314],[14.304133,120.953851],[14.300736,120.95414],[14.298364,120.955267],[14.298907,120.958437],[14.299263,120.958442],[14.29984,120.957407],[14.300342,120.957709],[14.3005,120.9576]] },
+}
+
+/** Looks up baked road geometry for an edge, direction-aware, with a straight-line fallback so a
+ *  future edge that forgets to fetch geometry degrades instead of crashing. */
+function roadSegmentFor(fromId: string, toId: string): RoadSegment {
+  const forward = ROAD_SEGMENTS[`${fromId}|${toId}`]
   if (forward !== undefined) return forward
-  const backward = ROAD_PATHS[`${toId}|${fromId}`]
-  if (backward !== undefined) return [...backward].reverse()
+
+  const backward = ROAD_SEGMENTS[`${toId}|${fromId}`]
+  if (backward !== undefined) return { distanceMeters: backward.distanceMeters, path: [...backward.path].reverse() }
+
   const fromCoord = NODE_COORDS.get(fromId)
   const toCoord = NODE_COORDS.get(toId)
-  return fromCoord !== undefined && toCoord !== undefined ? [fromCoord, toCoord] : []
+  if (fromCoord === undefined || toCoord === undefined) return { distanceMeters: 0, path: [] }
+  return { distanceMeters: Math.round(haversineMeters(fromCoord, toCoord)), path: [fromCoord, toCoord] }
 }
 
 // Arrival info ("sabihin kay Manong" cues) keyed by destination node, per docs/cavite-network.md.
-// robinsons-dasma and silang-premier have no phrase in the source doc — inferred to match the
-// doc's naming pattern and flagged here so they're easy to replace with verified copy later.
+// robinsons-dasma and silang-premier have no phrase in the source doc, so they are inferred to
+// match the doc's naming pattern and flagged here for easy replacement with verified copy later.
 const ARRIVAL_INFO: Record<string, { driverPhrase: string; landmarkCues: string[]; verified: boolean }> = {
   "st-dominic": {
     driverPhrase: "St. Dominic babaan po",
@@ -138,7 +262,7 @@ const ARRIVAL_INFO: Record<string, { driverPhrase: string; landmarkCues: string[
     landmarkCues: ["Lumina Mall footbridge", "Robinsons Imus signage"],
     verified: true,
   },
-  // inferred — not in source doc
+  // inferred, not in source doc
   "robinsons-dasma": {
     driverPhrase: "Robinsons Dasma po",
     landmarkCues: ["Robinsons Place Dasmariñas main entrance"],
@@ -146,7 +270,7 @@ const ARRIVAL_INFO: Record<string, { driverPhrase: string; landmarkCues: string[
   },
   "sm-dasma": {
     driverPhrase: "SM Dasma tapat ng overpass po",
-    landmarkCues: ["SM City Dasmariñas overpass", "Governor's Drive junction"],
+    landmarkCues: ["SM City Dasmariñas overpass", "Hypermarket entrance"],
     verified: true,
   },
   "pala-pala": {
@@ -159,7 +283,7 @@ const ARRIVAL_INFO: Record<string, { driverPhrase: string; landmarkCues: string[
     landmarkCues: ["LPU Cavite main gate", "Manggahan jeepney stand"],
     verified: true,
   },
-  // inferred — not in source doc
+  // inferred, not in source doc
   "silang-premier": {
     driverPhrase: "Silang Premier tapat po",
     landmarkCues: ["Silang Premier outlet entrance"],
@@ -167,83 +291,295 @@ const ARRIVAL_INFO: Record<string, { driverPhrase: string; landmarkCues: string[
   },
 }
 
-// Short destination-board text, as painted on jeepney/bus signboards along the corridor.
-const BOARD_NAME: Record<string, string> = {
-  "st-dominic": "ST. DOMINIC",
-  "imus-lumina": "IMUS / LUMINA",
-  "robinsons-dasma": "ROBINSONS DASMA",
-  "sm-dasma": "SM DASMA",
-  "pala-pala": "PALA-PALA",
-  "lpu-gentri": "LPU / GEN. TRIAS",
-  "silang-premier": "SILANG",
+const WAITING_SPOT = new Map(CAVITE_PILOT_NODES.map((node) => [node.id, node.waitingSpot]))
+
+// Corridor speeds in km/h. Grounded in a Manila transit study, scaled up for this lighter-traffic
+// highway. Documented estimates, not measured, and the UI says so.
+export const SPEED_KMH: Record<TransitMode, number> = {
+  jeepney: 15,
+  bus: 18,
+  uv_express: 20,
+  tricycle: 12,
+  walk: 4.5,
 }
 
-// Fare/duration values below are derived from docs/cavite-network.md's fare formulas
-// (jeepney: ₱13 base/4km + ₱1.80/km; bus: ₱15 base/5km + ₱2.20/km) applied to the Haversine
-// distance between each pair's seed coordinates, at estimated corridor speeds (jeepney 15,
-// bus 18, UV Express 20 — grounded in a Manila transit study scaled up for this lighter-traffic
-// highway, tricycle 12, walk 4.5 km/h). UV Express and tricycle fares use the doc's flat rates.
-// These are documented estimates, not measured values — safe to replace with real numbers later.
-function edgePair(
-  fromId: string,
-  toId: string,
-  mode: TransitMode,
-  fare: number,
-  durationMin: number,
+/**
+ * Two stops this close are a walk, never a fare. Boarding a jeepney to cross a terminal forecourt
+ * charges a full base fare for two minutes of riding, which is exactly the trap this rule closes:
+ * inside the radius the graph offers a free walking connection and no vehicle edge at all.
+ */
+export const WALKING_TRANSFER_RADIUS_METERS = 500
+
+interface ServiceSpec {
+  from: string
+  to: string
+  mode: TransitMode
+  vehicleClass: VehicleClass
+  /** Board text as painted for the `from` to `to` direction. */
+  forwardPlacard: string
+  /** Board text for the return direction. */
+  backwardPlacard: string
+  /** Other boards serving the same leg, either direction. Any of them is the right vehicle. */
+  alternatePlacards?: string[]
   /** Pass a shared id to mark segments that a single vehicle runs through without re-boarding. */
-  serviceId: string = `${mode}:${fromId}:${toId}`
-): [RouteSegmentEdge, RouteSegmentEdge] {
+  serviceId?: string
+}
+
+// Signboard texts follow the boards actually painted on vehicles along this corridor. They are
+// inferred from corridor convention, not quoted from docs/cavite-network.md the way the driver
+// phrases are, so treat them as the same grade of estimate as the fares.
+const CORRIDOR_SERVICES: ServiceSpec[] = [
+  {
+    from: "st-dominic",
+    to: "imus-lumina",
+    mode: "jeepney",
+    vehicleClass: "jeepney_traditional",
+    forwardPlacard: "IMUS / TANZANG LUMA",
+    backwardPlacard: "ZAPOTE / BACLARAN",
+  },
+  {
+    from: "st-dominic",
+    to: "imus-lumina",
+    mode: "bus",
+    vehicleClass: "bus",
+    forwardPlacard: "DASMARIÑAS - BACLARAN",
+    backwardPlacard: "BACLARAN - DASMARIÑAS",
+  },
+  {
+    from: "imus-lumina",
+    to: "robinsons-dasma",
+    mode: "jeepney",
+    vehicleClass: "jeepney_traditional",
+    forwardPlacard: "DASMARIÑAS / SALITRAN",
+    backwardPlacard: "IMUS / ZAPOTE",
+  },
+  {
+    from: "imus-lumina",
+    to: "robinsons-dasma",
+    mode: "bus",
+    vehicleClass: "bus",
+    forwardPlacard: "DASMARIÑAS - BACLARAN",
+    backwardPlacard: "BACLARAN - DASMARIÑAS",
+  },
+  {
+    from: "robinsons-dasma",
+    to: "sm-dasma",
+    mode: "jeepney",
+    vehicleClass: "jeepney_traditional",
+    forwardPlacard: "PALA-PALA / SM DASMA",
+    backwardPlacard: "SALITRAN / ROBINSONS",
+  },
+  {
+    from: "robinsons-dasma",
+    to: "sm-dasma",
+    mode: "bus",
+    vehicleClass: "bus",
+    forwardPlacard: "DASMARIÑAS - BACLARAN",
+    backwardPlacard: "BACLARAN - DASMARIÑAS",
+  },
+  // Inside the walking radius, so the rule below strips these two and leaves the free walk.
+  // Declared anyway: they document that vehicles do run this hop, and deleting them by hand would
+  // hide the very thing the rule exists to correct.
+  {
+    from: "sm-dasma",
+    to: "pala-pala",
+    mode: "jeepney",
+    vehicleClass: "jeepney_traditional",
+    forwardPlacard: "PALA-PALA / DASMA BAYAN",
+    backwardPlacard: "SM DASMA / SALITRAN",
+  },
+  {
+    from: "sm-dasma",
+    to: "pala-pala",
+    mode: "bus",
+    vehicleClass: "bus",
+    forwardPlacard: "DASMARIÑAS - BACLARAN",
+    backwardPlacard: "BACLARAN - DASMARIÑAS",
+  },
+  {
+    from: "pala-pala",
+    to: "lpu-gentri",
+    mode: "jeepney",
+    vehicleClass: "jeepney_traditional",
+    forwardPlacard: "MANGGAHAN / GOV. DRIVE",
+    backwardPlacard: "PALA-PALA / DASMA BAYAN",
+    alternatePlacards: ["TRECE / INDANG / DBB-C"],
+  },
+  {
+    from: "pala-pala",
+    to: "lpu-gentri",
+    mode: "tricycle",
+    vehicleClass: "tricycle",
+    forwardPlacard: "TODA: PALA-PALA / LPU GATE",
+    backwardPlacard: "TODA: LPU GATE / PALA-PALA",
+  },
+  {
+    from: "pala-pala",
+    to: "silang-premier",
+    mode: "bus",
+    vehicleClass: "bus",
+    forwardPlacard: "SILANG / TAGAYTAY",
+    backwardPlacard: "DASMARIÑAS / PALA-PALA",
+  },
+  // The doc describes Silang Premier as served by modern jeeps, which carry the ₱15 base fare.
+  {
+    from: "pala-pala",
+    to: "silang-premier",
+    mode: "jeepney",
+    vehicleClass: "jeepney_modern",
+    forwardPlacard: "SILANG BAYAN",
+    backwardPlacard: "PALA-PALA / DASMA BAYAN",
+  },
+  {
+    from: "st-dominic",
+    to: "sm-dasma",
+    mode: "uv_express",
+    vehicleClass: "uv_express",
+    forwardPlacard: "DASMARIÑAS - PITX",
+    backwardPlacard: "PITX - DASMARIÑAS",
+  },
+]
+
+/**
+ * Builds the two directed edges for one service. Fare comes from the LTFRB matrix in fares.ts
+ * applied to real road kilometers, and duration from the corridor speed table, so no number in
+ * the graph is hand-typed and able to drift from the rules that produced it.
+ */
+function edgePair(spec: ServiceSpec): [RouteSegmentEdge, RouteSegmentEdge] {
+  const { from: fromId, to: toId, mode, vehicleClass } = spec
+  const serviceId = spec.serviceId ?? `${mode}:${fromId}:${toId}`
+  const alternatePlacards = spec.alternatePlacards ?? []
+
+  const road = roadSegmentFor(fromId, toId)
+  const distanceKm = road.distanceMeters / 1000
+  const fare = computeFare(vehicleClass, distanceKm)
+  const durationMin = Math.max(1, Math.round((distanceKm / SPEED_KMH[mode]) * 60))
+
+  const shared = {
+    mode,
+    vehicleClass,
+    serviceId,
+    alternatePlacards,
+    fare,
+    durationMin,
+    distanceMeters: road.distanceMeters,
+  }
+
   const forwardArrival = ARRIVAL_INFO[toId]
   const backwardArrival = ARRIVAL_INFO[fromId]
-  const forwardRoad = roadPathFor(fromId, toId)
-  const backwardRoad = [...forwardRoad].reverse()
+
   return [
     {
+      ...shared,
       fromNodeId: fromId,
       toNodeId: toId,
-      mode,
-      serviceId,
-      signboard: BOARD_NAME[toId],
-      fare,
-      durationMin,
+      placardText: spec.forwardPlacard,
+      boardingSpot: WAITING_SPOT.get(fromId) ?? "",
       landmarkCues: forwardArrival.landmarkCues,
       driverPhrase: forwardArrival.driverPhrase,
       landmarkVerified: forwardArrival.verified,
-      roadPath: forwardRoad,
+      roadPath: road.path,
     },
     {
+      ...shared,
       fromNodeId: toId,
       toNodeId: fromId,
-      mode,
-      serviceId,
-      signboard: BOARD_NAME[fromId],
-      fare,
-      durationMin,
+      placardText: spec.backwardPlacard,
+      boardingSpot: WAITING_SPOT.get(toId) ?? "",
       landmarkCues: backwardArrival.landmarkCues,
       driverPhrase: backwardArrival.driverPhrase,
       landmarkVerified: backwardArrival.verified,
-      roadPath: backwardRoad,
+      roadPath: [...road.path].reverse(),
     },
   ]
 }
 
-export const CAVITE_PILOT_EDGES: RouteSegmentEdge[] = [
-  ...edgePair("st-dominic", "imus-lumina", "jeepney", 13, 11),
-  ...edgePair("st-dominic", "imus-lumina", "bus", 15, 10),
-  ...edgePair("imus-lumina", "robinsons-dasma", "jeepney", 25, 43),
-  ...edgePair("imus-lumina", "robinsons-dasma", "bus", 28, 36),
-  ...edgePair("robinsons-dasma", "sm-dasma", "jeepney", 13, 5),
-  ...edgePair("robinsons-dasma", "sm-dasma", "bus", 15, 4),
-  ...edgePair("robinsons-dasma", "sm-dasma", "walk", 0, 16),
-  ...edgePair("sm-dasma", "pala-pala", "jeepney", 13, 2),
-  ...edgePair("sm-dasma", "pala-pala", "bus", 15, 2),
-  ...edgePair("sm-dasma", "pala-pala", "walk", 0, 8),
-  ...edgePair("pala-pala", "lpu-gentri", "jeepney", 19, 29),
-  ...edgePair("pala-pala", "lpu-gentri", "tricycle", 35, 36),
-  ...edgePair("pala-pala", "silang-premier", "bus", 24, 31),
-  ...edgePair("pala-pala", "silang-premier", "jeepney", 22, 37),
-  ...edgePair("st-dominic", "sm-dasma", "uv_express", 50, 43),
-]
+/** Both directed keys for a node pair, so a lookup does not care which way an edge points. */
+function pairKey(a: string, b: string): string {
+  return `${a}|${b}`
+}
+
+/** Node pairs close enough that walking beats paying. See `WALKING_TRANSFER_RADIUS_METERS`. */
+function findWalkablePairs(nodes: TransitNode[]): { fromId: string; toId: string; meters: number }[] {
+  const pairs: { fromId: string; toId: string; meters: number }[] = []
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i + 1; j < nodes.length; j++) {
+      const a = nodes[i]
+      const b = nodes[j]
+      const meters = haversineMeters([a.lat, a.lng], [b.lat, b.lng])
+      if (meters <= WALKING_TRANSFER_RADIUS_METERS) pairs.push({ fromId: a.id, toId: b.id, meters })
+    }
+  }
+  return pairs
+}
+
+/** A free, on-foot connection between two adjacent stops: straight line, no fare, no boarding. */
+function walkEdgePair(fromId: string, toId: string, meters: number): [RouteSegmentEdge, RouteSegmentEdge] {
+  const fromCoord = NODE_COORDS.get(fromId) ?? [0, 0]
+  const toCoord = NODE_COORDS.get(toId) ?? [0, 0]
+  const durationMin = Math.max(1, Math.round((meters / 1000 / SPEED_KMH.walk) * 60))
+
+  // Straight line on purpose. The road geometry between two stops this close is a vehicle detour
+  // around a divided highway, and tracing a 1.5 km car loop as a 270 m walk would be a lie.
+  const shared = {
+    mode: "walk" as const,
+    vehicleClass: "walk" as const,
+    serviceId: `walk:${fromId}:${toId}`,
+    placardText: "",
+    alternatePlacards: [],
+    fare: 0,
+    durationMin,
+    distanceMeters: Math.round(meters),
+  }
+
+  return [
+    {
+      ...shared,
+      fromNodeId: fromId,
+      toNodeId: toId,
+      boardingSpot: WAITING_SPOT.get(fromId) ?? "",
+      landmarkCues: ARRIVAL_INFO[toId].landmarkCues,
+      driverPhrase: ARRIVAL_INFO[toId].driverPhrase,
+      landmarkVerified: ARRIVAL_INFO[toId].verified,
+      roadPath: [fromCoord, toCoord] as [number, number][],
+    },
+    {
+      ...shared,
+      fromNodeId: toId,
+      toNodeId: fromId,
+      boardingSpot: WAITING_SPOT.get(toId) ?? "",
+      landmarkCues: ARRIVAL_INFO[fromId].landmarkCues,
+      driverPhrase: ARRIVAL_INFO[fromId].driverPhrase,
+      landmarkVerified: ARRIVAL_INFO[fromId].verified,
+      roadPath: [toCoord, fromCoord] as [number, number][],
+    },
+  ]
+}
+
+/**
+ * Walking-first rule. For every pair of stops inside `WALKING_TRANSFER_RADIUS_METERS`, drops every
+ * vehicle edge between them and guarantees a free walking edge instead, so the planner can never
+ * charge a base fare for a two-minute hop between adjacent terminals.
+ */
+export function applyWalkingFirstRule(nodes: TransitNode[], edges: RouteSegmentEdge[]): RouteSegmentEdge[] {
+  const walkable = findWalkablePairs(nodes)
+  if (walkable.length === 0) return edges
+
+  const walkableKeys = new Set<string>()
+  for (const pair of walkable) {
+    walkableKeys.add(pairKey(pair.fromId, pair.toId))
+    walkableKeys.add(pairKey(pair.toId, pair.fromId))
+  }
+
+  const kept = edges.filter((edge) => !walkableKeys.has(pairKey(edge.fromNodeId, edge.toNodeId)))
+  const walks = walkable.flatMap((pair) => walkEdgePair(pair.fromId, pair.toId, pair.meters))
+  return [...kept, ...walks]
+}
+
+export const CAVITE_PILOT_EDGES: RouteSegmentEdge[] = applyWalkingFirstRule(
+  CAVITE_PILOT_NODES,
+  CORRIDOR_SERVICES.flatMap(edgePair)
+)
 
 const CAVITE_PILOT_NETWORK: TransitNetwork = {
   nodes: CAVITE_PILOT_NODES,
@@ -256,7 +592,7 @@ export default CAVITE_PILOT_NETWORK
 // Routing
 // ---------------------------------------------------------------------------
 
-// Minutes added to the "easiest" score per mode change / per walking segment, so that priority
+// Minutes added to the "easiest" score per service change / per walking segment, so that priority
 // heavily favors staying on one vehicle over minimizing raw time. Documented estimates (see
 // docs/cavite-network.md), tunable here.
 const TRANSFER_PENALTY_MIN = 15
@@ -370,11 +706,16 @@ function buildAdjacency(edges: RouteSegmentEdge[]): Map<string, RouteSegmentEdge
   return adjacency
 }
 
-// Dijkstra over a state-expanded graph (node + last-used mode) so the "easiest" weight function
-// can penalize mode changes without turning the search into a non-shortest-path problem. Edge
+// Dijkstra over a state-expanded graph (node + last-used service) so the "easiest" weight function
+// can penalize transfers without turning the search into a non-shortest-path problem. Edge
 // iteration order follows the seed array (fixed), and heap ties break on insertion order, so
 // results are deterministic across runs.
-function runDijkstra(network: TransitNetwork, originId: string, destinationId: string, weightFn: WeightFn): RouteSegmentEdge[] | null {
+function runDijkstra(
+  network: TransitNetwork,
+  originId: string,
+  destinationId: string,
+  weightFn: WeightFn
+): RouteSegmentEdge[] | null {
   const adjacency = buildAdjacency(network.edges)
   const dist = new Map<string, number>()
   const prevEdge = new Map<string, RouteSegmentEdge>()
@@ -435,7 +776,7 @@ function runDijkstra(network: TransitNetwork, originId: string, destinationId: s
 }
 
 /**
- * Two consecutive segments are one ride — not two — when the commuter never gets off. That's true
+ * Two consecutive segments are one ride, not two, when the commuter never gets off. That's true
  * when they share a service, and always true for walking (a walk through an interchange is one
  * continuous walk). Anything else means standing up, paying again, and boarding something new.
  */
@@ -447,7 +788,7 @@ function isSameRide(previous: RouteSegmentEdge, next: RouteSegmentEdge): boolean
 /**
  * Route confidence, 0-100, grounded in the repo's own data provenance: it starts from how many of
  * the route's drop-off cues are quoted from docs/cavite-network.md versus inferred, then deducts
- * for the things that go wrong on the ground — every transfer is a ride that might not show up,
+ * for the things that go wrong on the ground. Every transfer is a ride that might not show up, and
  * every walking leg is a stretch with no signboard to follow.
  */
 export function computeConfidence(steps: RouteStep[], transferCount: number): number {
@@ -458,7 +799,12 @@ export function computeConfidence(steps: RouteStep[], transferCount: number): nu
   return Math.max(40, Math.min(99, Math.round(raw)))
 }
 
-function buildRouteResult(network: TransitNetwork, priority: RoutePriority, path: RouteSegmentEdge[], originId: string): RouteResult {
+function buildRouteResult(
+  network: TransitNetwork,
+  priority: RoutePriority,
+  path: RouteSegmentEdge[],
+  originId: string
+): RouteResult {
   const nodesById = new Map(network.nodes.map((n) => [n.id, n]))
 
   const nodeOrThrow = (nodeId: string): TransitNode => {
@@ -478,35 +824,41 @@ function buildRouteResult(network: TransitNetwork, priority: RoutePriority, path
     const toNode = nodeOrThrow(edge.toNodeId)
     const toCoord: [number, number] = [toNode.lat, toNode.lng]
 
-    // Extend the ride in progress rather than starting a new one — the commuter stays seated, so
+    // Extend the ride in progress rather than starting a new one: the commuter stays seated, so
     // this is one leg with a longer fare, a longer clock, and a later drop-off.
     if (previousEdge !== null && isSameRide(previousEdge, edge)) {
       const current = steps[steps.length - 1]
       current.viaStops.push(fromNode.name)
       current.to = toNode.name
-      current.signboard = edge.signboard
+      current.placardText = edge.placardText
+      current.alternatePlacards = edge.alternatePlacards
       current.driverPhrase = edge.driverPhrase
       current.landmarkCues = edge.landmarkCues
       current.landmark = edge.landmarkCues.join("; ")
       current.landmarkVerified = current.landmarkVerified && edge.landmarkVerified
       current.fare += edge.fare
       current.durationMin += edge.durationMin
+      current.distanceMeters += edge.distanceMeters
       // Skip the road path's first point: it's the shared node the previous edge's road path
       // already ends on, and repeating it would draw a zero-length kink in the merged line.
       current.path.push(...edge.roadPath.slice(1))
     } else {
       steps.push({
         mode: edge.mode,
+        vehicleClass: edge.vehicleClass,
         serviceId: edge.serviceId,
         from: fromNode.name,
         to: toNode.name,
         viaStops: [],
-        signboard: edge.signboard,
+        placardText: edge.placardText,
+        alternatePlacards: edge.alternatePlacards,
+        boardingSpot: edge.boardingSpot,
         driverPhrase: edge.driverPhrase,
         landmarkCues: edge.landmarkCues,
         landmark: edge.landmarkCues.join("; "),
         fare: edge.fare,
         durationMin: edge.durationMin,
+        distanceMeters: edge.distanceMeters,
         landmarkVerified: edge.landmarkVerified,
         path: edge.roadPath.length > 0 ? [...edge.roadPath] : [[fromNode.lat, fromNode.lng], toCoord],
       })
@@ -520,8 +872,8 @@ function buildRouteResult(network: TransitNetwork, priority: RoutePriority, path
   const totalDurationMin = steps.reduce((sum, step) => sum + step.durationMin, 0)
   const walkingMinutes = steps.filter((s) => s.mode === "walk").reduce((sum, step) => sum + step.durationMin, 0)
 
-  // A transfer is a boarding after the first one. Walking isn't a boarding, so a jeep -> walk ->
-  // jeep route is one transfer (two vehicles), not two.
+  // A transfer is a boarding after the first one. Walking isn't a boarding, so a jeep, walk, jeep
+  // route is one transfer (two vehicles), not two.
   const vehicleSteps = steps.filter((step) => step.mode !== "walk").length
   const transferCount = Math.max(0, vehicleSteps - 1)
 
@@ -537,7 +889,12 @@ function buildRouteResult(network: TransitNetwork, priority: RoutePriority, path
   }
 }
 
-export function findRoute(network: TransitNetwork, originId: string, destinationId: string, priority: RoutePriority): RouteResult | null {
+export function findRoute(
+  network: TransitNetwork,
+  originId: string,
+  destinationId: string,
+  priority: RoutePriority
+): RouteResult | null {
   const weightFn = weightFnFor(priority)
   const path = runDijkstra(network, originId, destinationId, weightFn)
   if (path === null) return null

@@ -1,8 +1,10 @@
 // Interactive Cavite corridor map: renders the pilot node network, highlights the selected
-// origin/destination, and draws the active route (colored per transit mode) when one is picked.
+// origin/destination, draws the active route as real road geometry (colored per transit mode), and
+// while a live trip is being tracked, redraws the ridden portion as done and follows the
+// commuter's GPS fix with a pulsing "you are here" marker.
 
-import { Fragment, useEffect } from "react"
-import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap } from "react-leaflet"
+import { Fragment, useEffect, useMemo } from "react"
+import { MapContainer, TileLayer, Marker, Popup, Polyline, Circle, useMap } from "react-leaflet"
 import L from "leaflet"
 import "leaflet/dist/leaflet.css"
 
@@ -20,6 +22,9 @@ L.Icon.Default.mergeOptions({
   shadowUrl: markerShadowUrl,
 })
 
+import type { LiveFix } from "@/hooks/useGeolocation"
+import type { TripProgress } from "@/hooks/useTripProgress"
+import { MODE_META } from "@/utils/presentation"
 import { CAVITE_PILOT_NODES, type RouteResult, type TransitMode } from "@/utils/routingEngine"
 
 interface CommuterMapProps {
@@ -28,37 +33,48 @@ interface CommuterMapProps {
   activeRoute: RouteResult | null
   /** Index of the step the commuter has open in the result card; that leg is drawn highlighted. */
   activeStepIndex?: number | null
+  isDark?: boolean
+  /** Live GPS fix, when a trip is being tracked. */
+  userFix?: LiveFix | null
+  /** Where that fix lands on the route. Drives the traveled and remaining split. */
+  progress?: TripProgress | null
+  /** True while actively tracking: the map follows the live fix instead of fitting the whole route. */
+  tracking?: boolean
 }
 
-const CAVITE_CENTER: [number, number] = [14.3218, 120.9634]
-const CAVITE_ZOOM = 12
+// Midpoint of the corrected corridor, which now runs from Bacoor Longos down to Silang.
+const CAVITE_CENTER: [number, number] = [14.3512, 120.9449]
+const CAVITE_ZOOM = 11
 
-const CARTODB_POSITRON_URL = "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
+const CARTODB_LIGHT_URL = "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
+const CARTODB_DARK_URL = "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
 const CARTODB_ATTRIBUTION =
   '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
 
-// Transit accent palette, per the uiux-promax skill: Emerald for jeepneys, Amber for bus/UV
-// Express, Sky for tricycles. Walking legs aren't a "mode" in that palette, so they get a
-// neutral dashed line, the standard map convention for on-foot segments.
-const MODE_COLORS: Record<TransitMode, string> = {
-  jeepney: "#10b981",
-  bus: "#f59e0b",
-  uv_express: "#f59e0b",
-  tricycle: "#0ea5e9",
-  walk: "#71717a",
-}
+// The portion of a leg already ridden fades to this neutral so the eye reads it as "done" rather
+// than as another mode color competing with what's still ahead.
+const TRAVELED_COLOR = "#94a3b8"
+
+/**
+ * Line style carries the same meaning here as it does in the sakay guide's timeline: a ride is a
+ * solid stroke in its mode colour, an on-foot leg is a dashed slate stroke. That pairing is the
+ * whole reason a commuter can glance between the card and the map without re-reading a legend.
+ */
+const WALK_DASH = "2 9"
+/** Already-ridden road gets a finer dash so "behind me" and "on foot" never look alike. */
+const TRAVELED_DASH = "1 7"
 
 type PinStatus = "origin" | "destination" | "default"
 
 const PIN_FILL: Record<PinStatus, string> = {
-  origin: "#10b981",
-  destination: "#f59e0b",
+  origin: MODE_META.jeepney.hex,
+  destination: "#b45309",
   default: "#18181b",
 }
 
 const PIN_HALO: Record<PinStatus, string> = {
-  origin: "rgba(16, 185, 129, 0.25)",
-  destination: "rgba(245, 158, 11, 0.25)",
+  origin: "rgba(5, 150, 105, 0.25)",
+  destination: "rgba(180, 83, 9, 0.25)",
   default: "rgba(24, 24, 27, 0.12)",
 }
 
@@ -87,6 +103,18 @@ function createPinIcon(status: PinStatus, isTerminal: boolean): L.DivIcon {
   })
 }
 
+// A pulsing blue dot, the conventional "you are here" GPS marker on every map app, so it reads
+// instantly instead of needing to be learned like a custom pin would.
+function createLiveMarkerIcon(): L.DivIcon {
+  const html = `
+    <div class="commutayo-live-marker" style="position:relative;width:22px;height:22px;">
+      <span class="pulse" style="position:absolute;inset:0;border-radius:9999px;background:rgba(37,99,235,0.45);"></span>
+      <span style="position:absolute;inset:5px;border-radius:9999px;background:#2563eb;border:2px solid #ffffff;box-shadow:0 1px 4px rgba(0,0,0,0.4);"></span>
+    </div>
+  `
+  return L.divIcon({ html, className: "", iconSize: [22, 22], iconAnchor: [11, 11] })
+}
+
 function pinStatusFor(nodeId: string, originId: string | null, destId: string | null): PinStatus {
   if (nodeId === originId) return "origin"
   if (nodeId === destId) return "destination"
@@ -96,51 +124,139 @@ function pinStatusFor(nodeId: string, originId: string | null, destId: string | 
 /**
  * Keeps the picked route in frame: fits the whole trip when it changes, and zooms to the single
  * leg the commuter has open in the result card. Without this the map sits at a fixed corridor
- * center and a short trip is a cluster of pins in one corner.
+ * center and a short trip is a cluster of pins in one corner. Disabled while a live trip is being
+ * followed. See FollowLiveLocation, which takes over the camera at that point.
  */
-function FitToRoute({ route, activeStepIndex }: { route: RouteResult | null; activeStepIndex: number | null }) {
+function FitToRoute({
+  route,
+  activeStepIndex,
+  disabled,
+}: {
+  route: RouteResult | null
+  activeStepIndex: number | null
+  disabled: boolean
+}) {
   const map = useMap()
 
   useEffect(() => {
-    if (route === null || route.polylineCoordinates.length === 0) return
+    if (disabled || route === null || route.polylineCoordinates.length === 0) return
     const step = activeStepIndex === null ? undefined : route.steps[activeStepIndex]
     const points = step?.path ?? route.polylineCoordinates
     if (points.length === 0) return
 
     // A tick late on purpose: Leaflet silently drops a fitBounds issued in the same tick the map
     // is set up, and the container may not have its final size until layout settles. A timer, not
-    // requestAnimationFrame — rAF is paused in a backgrounded tab, which would leave the map
+    // requestAnimationFrame, because rAF is paused in a backgrounded tab, which would leave the map
     // framed on the wrong trip until the commuter switched back to it.
     const timer = setTimeout(() => {
       map.invalidateSize({ animate: false })
       map.fitBounds(L.latLngBounds(points), { padding: [32, 32], maxZoom: 15, animate: false })
     }, 0)
     return () => clearTimeout(timer)
-  }, [map, route, activeStepIndex])
+  }, [map, route, activeStepIndex, disabled])
 
   return null
 }
 
-export function CommuterMap({ originId, destId, activeRoute, activeStepIndex = null }: CommuterMapProps) {
-  // Each step carries its own path, so a step that merges several segments still draws as one
-  // continuous line — walking the coordinate array by index would silently mis-align once the
-  // engine merges legs.
-  const routeSegments = activeRoute?.steps.map((step, index) => ({ step, index, path: step.path }))
+/** While tracking, recenters on the live fix as it moves. animate:false for the same reason
+ *  FitToRoute avoids requestAnimationFrame: a backgrounded tab would otherwise strand the pan
+ *  mid-flight instead of just landing on the right spot. */
+function FollowLiveLocation({ point, active }: { point: [number, number] | null; active: boolean }) {
+  const map = useMap()
+
+  useEffect(() => {
+    if (!active || point === null) return
+    map.panTo(point, { animate: false })
+  }, [map, point, active])
+
+  return null
+}
+
+interface SegmentPiece {
+  key: string
+  path: [number, number][]
+  mode: TransitMode
+  isDimmed: boolean
+  isFocused: boolean
+  status: "traveled" | "current" | "upcoming"
+}
+
+export function CommuterMap({
+  originId,
+  destId,
+  activeRoute,
+  activeStepIndex = null,
+  isDark = false,
+  userFix = null,
+  progress = null,
+  tracking = false,
+}: CommuterMapProps) {
+  const isTrackingLive = tracking && progress !== null && progress.onRoute
+
+  // Each step carries its own real-road path, so a step that merges several segments still draws
+  // as one continuous line. While a trip is tracked, the step under the live fix is split at the
+  // fix's projected point into a "done" piece and a "still ahead" piece.
+  const pieces = useMemo<SegmentPiece[]>(() => {
+    if (activeRoute === null) return []
+
+    return activeRoute.steps.flatMap((step, index): SegmentPiece[] => {
+      const isDimmed = activeStepIndex !== null && activeStepIndex !== index
+      const isFocused = activeStepIndex === index
+      const base = { mode: step.mode, isDimmed, isFocused }
+
+      if (!isTrackingLive || progress === null) {
+        return [{ ...base, key: `${step.serviceId}-${index}`, path: step.path, status: "upcoming" }]
+      }
+
+      if (index < progress.stepIndex) {
+        return [{ ...base, key: `${step.serviceId}-${index}`, path: step.path, status: "traveled" }]
+      }
+      if (index > progress.stepIndex) {
+        return [{ ...base, key: `${step.serviceId}-${index}`, path: step.path, status: "upcoming" }]
+      }
+
+      // The step the commuter is on right now: split at the live fix's projected point.
+      const cutIndex = Math.min(Math.max(progress.pathIndex, 0), step.path.length - 1)
+      const traveledPath: [number, number][] = [...step.path.slice(0, cutIndex + 1), progress.point]
+      const remainingPath: [number, number][] = [progress.point, ...step.path.slice(cutIndex + 1)]
+      return [
+        { ...base, key: `${step.serviceId}-${index}-done`, path: traveledPath, status: "traveled" },
+        { ...base, key: `${step.serviceId}-${index}-ahead`, path: remainingPath, status: "current" },
+      ]
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeRoute, activeStepIndex, isTrackingLive, progress])
+
+  const livePoint: [number, number] | null =
+    userFix === null ? null : progress !== null && progress.onRoute ? progress.point : [userFix.lat, userFix.lng]
 
   return (
     <>
       <style>{`
         .commutayo-popup .leaflet-popup-content-wrapper {
-          background: rgba(24, 24, 27, 0.92);
+          background: ${isDark ? "rgba(39, 39, 42, 0.95)" : "rgba(24, 24, 27, 0.92)"};
           color: #fafafa;
           border-radius: 12px;
           box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
         }
         .commutayo-popup .leaflet-popup-tip {
-          background: rgba(24, 24, 27, 0.92);
+          background: ${isDark ? "rgba(39, 39, 42, 0.95)" : "rgba(24, 24, 27, 0.92)"};
         }
         .commutayo-popup .leaflet-popup-content {
           margin: 10px 12px;
+        }
+        ${
+          isDark
+            ? ""
+            : `.leaflet-tile-pane { filter: saturate(0.7) brightness(0.97) contrast(0.96); }`
+        }
+        @keyframes commutayo-pulse {
+          0% { transform: scale(0.6); opacity: 0.55; }
+          70%, 100% { transform: scale(2.4); opacity: 0; }
+        }
+        .commutayo-live-marker .pulse { animation: commutayo-pulse 2.2s cubic-bezier(0.16, 1, 0.3, 1) infinite; }
+        @media (prefers-reduced-motion: reduce) {
+          .commutayo-live-marker .pulse { animation: none; opacity: 0.35; }
         }
       `}</style>
       <MapContainer
@@ -149,34 +265,44 @@ export function CommuterMap({ originId, destId, activeRoute, activeStepIndex = n
         style={{ height: "100%", width: "100%" }}
         className="rounded-2xl"
       >
-        <TileLayer url={CARTODB_POSITRON_URL} attribution={CARTODB_ATTRIBUTION} />
+        <TileLayer url={isDark ? CARTODB_DARK_URL : CARTODB_LIGHT_URL} attribution={CARTODB_ATTRIBUTION} />
 
-        <FitToRoute route={activeRoute} activeStepIndex={activeStepIndex} />
+        <FitToRoute route={activeRoute} activeStepIndex={activeStepIndex} disabled={isTrackingLive} />
+        <FollowLiveLocation point={livePoint} active={isTrackingLive} />
 
-        {routeSegments?.map((segment) => {
-          // With a step open in the card, that leg stays full-strength and everything else fades
-          // back, so the map answers "which part am I reading about?" without a second glance.
-          const isDimmed = activeStepIndex !== null && activeStepIndex !== segment.index
-          const isFocused = activeStepIndex === segment.index
+        {pieces.map((piece) => {
+          const modeMeta = MODE_META[piece.mode]
+          const isTraveled = piece.status === "traveled"
+          const isWalk = piece.mode === "walk"
+          const color = isTraveled ? TRAVELED_COLOR : modeMeta.hex
+          const dimMultiplier = piece.isDimmed ? 0.3 : 1
+          const baseOpacity = isTraveled ? 0.4 : piece.status === "current" ? 0.95 : 0.85
+
+          // Rides are solid, walks are dashed. A ride already behind the commuter keeps the solid
+          // vs dashed distinction and loses its colour instead, so mode stays readable end to end.
+          const dashArray = isWalk ? WALK_DASH : isTraveled ? TRAVELED_DASH : undefined
+
           return (
-            <Fragment key={`${segment.step.serviceId}-${segment.index}`}>
+            <Fragment key={piece.key}>
+              {/* A dark casing under every line, so an emerald route stays visible against a green
+                  park polygon and a slate walk stays visible against grey road fill. */}
               <Polyline
-                positions={segment.path}
+                positions={piece.path}
                 pathOptions={{
                   color: "#18181b",
-                  weight: isFocused ? 11 : 7,
-                  opacity: isDimmed ? 0.05 : 0.15,
+                  weight: piece.isFocused ? 11 : 7,
+                  opacity: piece.isDimmed ? 0.05 : 0.15,
                   lineCap: "round",
                 }}
               />
               <Polyline
-                positions={segment.path}
+                positions={piece.path}
                 pathOptions={{
-                  color: MODE_COLORS[segment.step.mode],
-                  weight: isFocused ? 7 : 5,
-                  opacity: isDimmed ? 0.3 : 0.95,
+                  color,
+                  weight: piece.isFocused ? 7 : 5,
+                  opacity: baseOpacity * dimMultiplier,
                   lineCap: "round",
-                  dashArray: segment.step.mode === "walk" ? "2 8" : undefined,
+                  dashArray,
                 }}
               />
             </Fragment>
@@ -188,22 +314,35 @@ export function CommuterMap({ originId, destId, activeRoute, activeStepIndex = n
           return (
             <Marker key={node.id} position={[node.lat, node.lng]} icon={createPinIcon(status, node.isTerminal)}>
               <Popup className="commutayo-popup">
-                <div className="min-w-[160px]">
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-400">{node.city}</p>
+                <div className="min-w-[180px] max-w-[240px]">
+                  <p className="text-xs font-medium text-zinc-400">{node.city}</p>
                   <p className="text-base font-bold leading-snug">{node.name}</p>
                   {status !== "default" && (
                     <span
-                      className="mt-1 inline-block rounded-full px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide"
-                      style={{ backgroundColor: PIN_FILL[status], color: "#18181b" }}
+                      className="mt-1.5 inline-block rounded-full px-2 py-0.5 text-xs font-semibold"
+                      style={{ backgroundColor: PIN_FILL[status], color: "#fafafa" }}
                     >
-                      {status}
+                      {status === "origin" ? "Simula" : "Destinasyon"}
                     </span>
                   )}
+                  {/* The pin marks a transit bay, not a building, so say what is actually there. */}
+                  <p className="mt-2 text-xs leading-relaxed text-zinc-300">{node.waitingSpot}</p>
                 </div>
               </Popup>
             </Marker>
           )
         })}
+
+        {userFix !== null && (
+          <>
+            <Circle
+              center={[userFix.lat, userFix.lng]}
+              radius={userFix.accuracyMeters}
+              pathOptions={{ color: "#2563eb", weight: 1, opacity: 0.25, fillColor: "#2563eb", fillOpacity: 0.08 }}
+            />
+            <Marker position={[userFix.lat, userFix.lng]} icon={createLiveMarkerIcon()} zIndexOffset={1000} />
+          </>
+        )}
       </MapContainer>
     </>
   )

@@ -1,6 +1,6 @@
 // Small geometry helpers for turning a live GPS fix into "where on the route is the commuter".
 // Distances are planar-projected (equirectangular), not great-circle exact, because every distance
-// here is well under a kilometer — at that scale the error against Haversine is centimeters, and a
+// here is well under a kilometer, so the error against Haversine is centimeters at that scale, and a
 // flat projection is what makes "nearest point on a polyline" a cheap loop instead of calculus.
 
 export type LatLng = [number, number]
@@ -34,7 +34,7 @@ interface Projection {
   point: LatLng
   /** How far off the route the query point is, in meters. */
   offRouteMeters: number
-  /** 0 at the segment's start, 1 at its end — where the projection landed. */
+  /** 0 at the segment's start, 1 at its end. Where the projection landed. */
   t: number
   /** Distance from the segment's start to the projected point, in meters. */
   distanceAlongSegmentMeters: number
@@ -66,11 +66,11 @@ function projectOntoSegment(point: LatLng, segStart: LatLng, segEnd: LatLng): Pr
 export interface RouteProjection {
   /** Index into `route.steps` the commuter's nearest point falls in. */
   stepIndex: number
-  /** Index into that step's `path` array — the point just before the projection. */
+  /** Index into that step's `path` array, the point just before the projection. */
   pathIndex: number
   /** The point on the route closest to the live fix. */
   point: LatLng
-  /** How far the live fix is from the route itself, in meters — high means "probably not on this ride". */
+  /** How far the live fix is from the route itself, in meters. High means "probably not on this ride". */
   offRouteMeters: number
   /** Meters travelled from the route's start up to the projected point. */
   distanceTraveledMeters: number
@@ -86,7 +86,7 @@ export interface RouteGeometry {
   cumulativeMeters: number
 }
 
-/** Flattens a route's steps into one indexed list of points with running distance — reused by
+/** Flattens a route's steps into one indexed list of points with running distance, reused by
  *  every projection call so a route with a live GPS feed isn't re-walking its whole path every fix. */
 export function buildRouteGeometry(steps: { path: LatLng[] }[]): RouteGeometry[] {
   const geometry: RouteGeometry[] = []

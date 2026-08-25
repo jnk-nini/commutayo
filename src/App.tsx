@@ -1,11 +1,11 @@
 // CommuTayo MVP shell for the Aguinaldo Highway pilot corridor.
 //
 // Two layouts, one state tree:
-//   Desktop (>= lg) — a fixed planner column (header + search + sakay guide) beside a full-height map.
-//   Mobile          — the map fills the screen and the planner rides in a draggable bottom sheet.
+//   Desktop (>= lg) a fixed planner column (header, search, sakay guide) beside a full-height map.
+//   Mobile          the map fills the screen and the planner rides in a draggable bottom sheet.
 //
-// Everything the commuter changes (origin, destination, priority, open step) lives here so the map
-// and the guide can never disagree about which trip is on screen.
+// Everything the commuter changes (origin, destination, priority, open step, live trip) lives here
+// so the map and the guide can never disagree about which trip is on screen.
 
 import {
   Component,
@@ -26,25 +26,60 @@ import {
   useReducedMotion,
   type PanInfo,
 } from "framer-motion"
-import { ChevronUp, CircleCheck, CircleX, Megaphone, Moon, RefreshCw, Sun, TriangleAlert, Zap } from "lucide-react"
+import {
+  ChevronUp,
+  CircleCheck,
+  CircleX,
+  Flag,
+  LoaderCircle,
+  MapPin,
+  Megaphone,
+  Moon,
+  Navigation,
+  RefreshCw,
+  Square,
+  Sun,
+  TriangleAlert,
+  Zap,
+} from "lucide-react"
 
 import CommuterMap from "@/components/CommuterMap"
+import PlacardTag from "@/components/PlacardTag"
 import RouteEmptyState, { type RouteEmptyReason } from "@/components/RouteEmptyState"
 import RouteResultCard from "@/components/RouteResultCard"
 import RouteSearch from "@/components/RouteSearch"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { useGeolocation, type GeolocationStatus } from "@/hooks/useGeolocation"
+import {
+  useTripProgress,
+  vibrateArrivalPattern,
+  type ProximityEvent,
+  type TripProgress,
+} from "@/hooks/useTripProgress"
 import { cn } from "@/lib/utils"
+import { formatPeso } from "@/utils/fares"
+import {
+  FOCUS,
+  GLASS,
+  GLASS_STRONG,
+  ICON,
+  INSET,
+  MODE_META,
+  PRESS,
+  RADIUS,
+  Z,
+  formatDuration,
+  formatMeters,
+} from "@/utils/presentation"
 import { CAVITE_PILOT_NODES, findRoutes, type RoutePriority, type RouteResult } from "@/utils/routingEngine"
 
-// The brief asked for "sm_dasma" -> "lpu_cavite"; the engine's real ids are hyphenated and the
-// General Trias stop is "lpu-gentri". These are the same two places, spelled the way the graph does.
 const DEFAULT_ORIGIN = "sm-dasma"
 const DEFAULT_DEST = "lpu-gentri"
 
 const NODE_NAME = new Map(CAVITE_PILOT_NODES.map((node) => [node.id, node.name]))
 
 /** How much of the bottom sheet stays on screen when it is collapsed. Enough for the search bar. */
-const SHEET_PEEK_PX = 228
+const SHEET_PEEK_PX = 236
 
 // ---------------------------------------------------------------------------
 // Crowdsourced verification
@@ -54,13 +89,12 @@ type FeedbackKind = "fare-ok" | "fare-changed" | "route-inactive"
 
 interface FeedbackOption {
   id: FeedbackKind
-  emoji: string
   label: string
   /** Plain Tagalog line under the label, so the choice needs no explaining. */
   hint: string
   /** Confirmation copy for the toast. */
   toast: string
-  /** Ring + wash for the button, and the toast's accent. */
+  /** Ring and wash for the button. */
   tone: string
   toastTone: string
   Icon: typeof CircleCheck
@@ -69,41 +103,48 @@ interface FeedbackOption {
 const FEEDBACK_OPTIONS: FeedbackOption[] = [
   {
     id: "fare-ok",
-    emoji: "\u{1F7E2}",
     label: "Tama ang pamasahe",
     hint: "Ganito rin ang binayaran ko kanina.",
     toast: "Salamat! Nadagdagan ang kumpiyansa sa rutang ito.",
-    tone: "ring-emerald-500/25 bg-emerald-500/[0.07] hover:bg-emerald-500/[0.12] text-emerald-700 dark:text-emerald-300",
-    toastTone: "text-emerald-600 dark:text-emerald-400",
+    tone: "ring-emerald-600/25 bg-emerald-500/[0.07] hover:bg-emerald-500/[0.12] text-emerald-800 dark:text-emerald-300",
+    toastTone: "text-emerald-700 dark:text-emerald-400",
     Icon: CircleCheck,
   },
   {
     id: "fare-changed",
-    emoji: "\u{26A0}\u{FE0F}",
     label: "Nagbago ang pamasahe",
     hint: "Iba ang siningil sa akin ng drayber.",
     toast: "Naitala ang pagbabago ng pamasahe. Salamat sa ulat!",
-    tone: "ring-amber-500/25 bg-amber-500/[0.07] hover:bg-amber-500/[0.12] text-amber-700 dark:text-amber-300",
-    toastTone: "text-amber-600 dark:text-amber-400",
+    tone: "ring-amber-600/25 bg-amber-500/[0.07] hover:bg-amber-500/[0.12] text-amber-800 dark:text-amber-300",
+    toastTone: "text-amber-700 dark:text-amber-400",
     Icon: TriangleAlert,
   },
   {
     id: "route-inactive",
-    emoji: "\u{274C}",
     label: "Wala nang ganitong biyahe",
     hint: "Hindi na bumibiyahe ang sasakyang ito.",
     toast: "Naitala na wala nang biyahe rito. Titingnan namin ito.",
-    tone: "ring-rose-500/25 bg-rose-500/[0.07] hover:bg-rose-500/[0.12] text-rose-700 dark:text-rose-300",
-    toastTone: "text-rose-600 dark:text-rose-400",
+    tone: "ring-rose-600/25 bg-rose-500/[0.07] hover:bg-rose-500/[0.12] text-rose-800 dark:text-rose-300",
+    toastTone: "text-rose-700 dark:text-rose-400",
     Icon: CircleX,
   },
 ]
 
+/**
+ * `alert` is the high-contrast treatment, and it is spent on exactly one thing: the 250 m warning
+ * that a drop-off is coming up. Everything else is a quiet `info` banner, so when the loud one
+ * appears it still means something.
+ */
+type ToastKind = "info" | "alert" | "celebration"
+
 interface ToastState {
   id: number
   message: string
+  /** Optional second line, used for the alert's distance and the arrival's closing note. */
+  detail?: string
   tone: string
   Icon: typeof CircleCheck
+  kind: ToastKind
 }
 
 // ---------------------------------------------------------------------------
@@ -121,15 +162,17 @@ function subscribeToDesktopQuery(onChange: () => void) {
 /**
  * True from the `lg` breakpoint up. Drives which of the two layouts renders.
  *
- * Read through `useSyncExternalStore` rather than an effect, so the very first render already
- * knows the width instead of flashing the mobile sheet on a desktop screen.
+ * Read through `useSyncExternalStore` rather than an effect, so the very first render already knows
+ * the width instead of flashing the mobile sheet on a desktop screen.
  */
 function useIsDesktop(): boolean {
   return useSyncExternalStore(subscribeToDesktopQuery, () => window.matchMedia(DESKTOP_QUERY).matches)
 }
 
-function peso(amount: number): string {
-  return `₱${amount.toFixed(2)}`
+/** Starts from the device's own setting rather than assuming light, then follows the manual toggle. */
+function prefersDark(): boolean {
+  if (typeof window === "undefined") return false
+  return window.matchMedia("(prefers-color-scheme: dark)").matches
 }
 
 // ---------------------------------------------------------------------------
@@ -181,21 +224,22 @@ function App() {
   const [destId, setDestId] = useState<string | null>(DEFAULT_DEST)
   const [priority, setPriority] = useState<RoutePriority>("fastest")
   const [activeStepIndex, setActiveStepIndex] = useState<number | null>(null)
-  const [isDark, setIsDark] = useState(false)
+  const [isDark, setIsDark] = useState(prefersDark)
   const [sheetExpanded, setSheetExpanded] = useState(true)
+  const [tripCompleted, setTripCompleted] = useState(false)
 
   const [feedbackOpen, setFeedbackOpen] = useState(false)
   const [toast, setToast] = useState<ToastState | null>(null)
-  // Reports are session-only — there is no backend wired up yet, and the dialog says so.
+  // Reports are session-only. There is no backend wired up yet, and the dialog says so.
   const [reportedTrips, setReportedTrips] = useState<Record<string, FeedbackKind>>({})
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", isDark)
   }, [isDark])
 
-  // The engine is synchronous and deterministic, so a search is just a memo — there is no real
-  // loading state to show. Solving all three priorities at once lets each tab preview its own
-  // fare and time. A throw here becomes an empty state instead of a crash.
+  // The engine is synchronous and deterministic, so a search is just a memo and there is no real
+  // loading state to show. Solving all three priorities at once lets each tab preview its own fare
+  // and time. A throw here becomes an empty state instead of a crash.
   const solved = useMemo(() => {
     if (originId === null || destId === null || originId === destId) {
       return { routes: null, failed: false }
@@ -245,7 +289,7 @@ function App() {
 
   // The pickers already drive the route as you touch them, so "search" only confirms the trip and
   // collapses any open step. It is the hook the search bar's parsed queries use to set all three
-  // values at once — and on mobile it opens the sheet so the steps are immediately readable.
+  // values at once, and on mobile it opens the sheet so the steps are immediately readable.
   const search = useCallback((nextOrigin: string, nextDest: string, nextPriority: RoutePriority) => {
     setOriginId(nextOrigin)
     setDestId(nextDest)
@@ -254,7 +298,7 @@ function App() {
     setSheetExpanded(true)
   }, [])
 
-  // --------------------------------------------------------------- Feedback
+  // --------------------------------------------------------------- Feedback and toasts
 
   const toastTimer = useRef<number | null>(null)
 
@@ -264,17 +308,98 @@ function App() {
     }
   }, [])
 
+  const showToast = useCallback((next: ToastState, durationMs: number) => {
+    setToast(next)
+    if (toastTimer.current !== null) window.clearTimeout(toastTimer.current)
+    toastTimer.current = window.setTimeout(() => setToast(null), durationMs)
+  }, [])
+
   const submitFeedback = useCallback(
     (option: FeedbackOption) => {
       setReportedTrips((current) => ({ ...current, [tripKey]: option.id }))
       setFeedbackOpen(false)
-      setToast({ id: Date.now(), message: option.toast, tone: option.toastTone, Icon: option.Icon })
-
-      if (toastTimer.current !== null) window.clearTimeout(toastTimer.current)
-      toastTimer.current = window.setTimeout(() => setToast(null), 3600)
+      showToast({ id: Date.now(), message: option.toast, tone: option.toastTone, Icon: option.Icon, kind: "info" }, 3600)
     },
-    [tripKey]
+    [tripKey, showToast]
   )
+
+  // --------------------------------------------------------------- Live trip tracking
+  //
+  // "Simulan" turns on the browser's GPS watch. useTripProgress projects each fix onto the active
+  // route so the map can redraw the ridden portion as done, and raises the three proximity moments
+  // below. The 250 m warning is the one that buzzes the phone: it is the only alert that arrives
+  // while there is still time to act on it.
+
+  const geo = useGeolocation()
+  const isTracking = geo.status === "requesting" || geo.status === "active"
+
+  const handleProximity = useCallback(
+    (event: ProximityEvent) => {
+      if (event.kind === "approaching") {
+        vibrateArrivalPattern()
+        showToast(
+          {
+            id: Date.now(),
+            message: `Malapit na ang babaan: ${event.placeName}`,
+            detail: `Mga ${event.minutes} min pa, ${formatMeters(event.distanceMeters)} ang layo. Maghanda nang bumaba.`,
+            tone: "text-amber-300",
+            Icon: TriangleAlert,
+            kind: "alert",
+          },
+          6000
+        )
+        return
+      }
+
+      if (event.kind === "arrived") {
+        showToast(
+          {
+            id: Date.now(),
+            message: `Nasa ${event.placeName} ka na po.`,
+            tone: "text-sky-700 dark:text-sky-400",
+            Icon: MapPin,
+            kind: "info",
+          },
+          3600
+        )
+        return
+      }
+
+      // Reaching the destination ends the ride: stop draining the GPS and flip the card to its
+      // summary, which is the only screen that can still be useful at this point.
+      vibrateArrivalPattern()
+      setTripCompleted(true)
+      geo.stop()
+      showToast(
+        {
+          id: Date.now(),
+          message: `Dumating ka na sa ${event.placeName}!`,
+          detail: "Nasa ibaba ang buod ng biyahe mo.",
+          tone: "text-emerald-700 dark:text-emerald-400",
+          Icon: Flag,
+          kind: "celebration",
+        },
+        5200
+      )
+    },
+    [geo, showToast]
+  )
+
+  const progress = useTripProgress(activeRoute, geo.fix, handleProximity)
+
+  // Changing the trip mid-track is a fresh trip: stop watching and clear the summary rather than
+  // silently keep tracking toward a stop the commuter no longer cares about.
+  useEffect(() => {
+    setTripCompleted(false)
+    if (isTracking) geo.stop()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tripKey, priority])
+
+  const planNewTrip = useCallback(() => {
+    setTripCompleted(false)
+    setActiveStepIndex(null)
+    setSheetExpanded(true)
+  }, [])
 
   // --------------------------------------------------------------- Shared pieces
 
@@ -312,6 +437,9 @@ function App() {
             onStepSelect={setActiveStepIndex}
             dismissible={!isDesktop}
             onClose={!isDesktop ? () => setSheetExpanded(false) : undefined}
+            completed={tripCompleted}
+            onReportIssue={() => setFeedbackOpen(true)}
+            onPlanNewTrip={planNewTrip}
           />
         ) : (
           emptyReason !== null && (
@@ -325,10 +453,20 @@ function App() {
         )}
       </AnimatePresence>
 
-      <p className="max-w-md px-2 pb-1 text-center text-xs leading-relaxed text-zinc-400 dark:text-zinc-500">
+      {activeRoute !== null && !tripCompleted && (
+        <TripTrackingBar
+          route={activeRoute}
+          geoStatus={geo.status}
+          progress={progress}
+          onStart={geo.start}
+          onStop={geo.stop}
+        />
+      )}
+
+      <p className="max-w-md px-2 pb-1 text-center text-xs leading-relaxed text-zinc-600 dark:text-zinc-300">
         {solved.failed
           ? "May aberya sa paghahanap ng ruta. Subukan ang ibang tapat o baligtarin ang direksyon."
-          : "Ang pamasahe at oras dito ay tantiya mula sa corridor spec, hindi pa sinusukat sa kalsada."}
+          : "Tantiya mula sa corridor spec ang pamasahe, oras at signboard dito. Hindi pa ito sinusukat sa kalsada."}
       </p>
     </>
   )
@@ -343,7 +481,16 @@ function App() {
         />
       )}
     >
-      <CommuterMap originId={originId} destId={destId} activeRoute={activeRoute} activeStepIndex={activeStepIndex} />
+      <CommuterMap
+        originId={originId}
+        destId={destId}
+        activeRoute={activeRoute}
+        activeStepIndex={activeStepIndex}
+        isDark={isDark}
+        userFix={geo.fix}
+        progress={progress}
+        tracking={isTracking}
+      />
     </AppErrorBoundary>
   )
 
@@ -353,7 +500,7 @@ function App() {
     <div className="bg-zinc-100 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-50">
       {isDesktop ? (
         <div className="grid h-screen w-full grid-cols-[minmax(24rem,28rem)_minmax(0,1fr)]">
-          <aside className="flex h-screen min-w-0 flex-col overflow-y-auto border-r border-black/[0.06] bg-zinc-100 dark:border-white/10 dark:bg-zinc-950">
+          <aside className="flex h-screen min-w-0 flex-col overflow-y-auto border-r border-zinc-900/[0.07] bg-zinc-100 dark:border-white/10 dark:bg-zinc-950">
             {header}
             <div className="flex min-w-0 flex-1 flex-col items-center gap-4 px-4 pb-6">{planner}</div>
           </aside>
@@ -364,11 +511,22 @@ function App() {
         <div className="relative h-[100dvh] w-full overflow-hidden">
           <div className="absolute inset-0">{map}</div>
 
-          {/* Leaflet's own panes top out around z-index 800, so the chrome sits above 1000. */}
-          <div className="pointer-events-none absolute inset-x-0 top-0 z-[1000] px-3 pt-3">{header}</div>
+          {/* Leaflet's own panes top out around z-index 800, so the chrome sits above 1000. The
+              insets keep the bar clear of a notch and of a landscape camera cutout. */}
+          <div
+            className={cn(
+              "pointer-events-none absolute inset-x-0 top-0",
+              Z.header,
+              "px-[max(0.75rem,env(safe-area-inset-left))] pt-[max(0.75rem,env(safe-area-inset-top))]"
+            )}
+          >
+            {header}
+          </div>
 
           <MobileSheet expanded={sheetExpanded} onExpandedChange={setSheetExpanded} reduceMotion={reduceMotion === true}>
-            <div className="flex min-w-0 flex-col items-center gap-4 px-4 pb-8">{planner}</div>
+            <div className="flex min-w-0 flex-col items-center gap-4 px-4 pb-[max(2rem,env(safe-area-inset-bottom))]">
+              {planner}
+            </div>
           </MobileSheet>
         </div>
       )}
@@ -383,7 +541,7 @@ function App() {
         onSubmit={submitFeedback}
       />
 
-      <ToastBanner toast={toast} reduceMotion={reduceMotion === true} />
+      <ToastBanner toast={toast} reduceMotion={reduceMotion === true} onDismiss={() => setToast(null)} />
     </div>
   )
 }
@@ -407,24 +565,22 @@ function AppHeader({ isDark, onToggleDark, onReport, canReport, reported, floati
     <header
       className={cn(
         "pointer-events-auto flex w-full items-center gap-2",
-        floating
-          ? "rounded-3xl bg-zinc-50/85 px-3 py-2.5 ring-1 ring-black/[0.06] backdrop-blur-md shadow-[0_1px_2px_rgba(0,0,0,0.04),0_12px_32px_-16px_rgba(0,0,0,0.3)] dark:bg-zinc-900/80 dark:ring-white/10"
-          : "px-4 pt-5 pb-3"
+        floating ? cn("px-3 py-2.5", RADIUS.panel, GLASS_STRONG) : "px-4 pt-5 pb-3"
       )}
     >
       <div className="min-w-0 flex-1">
         <h1 className="truncate text-lg leading-tight font-bold tracking-tight">
-          Commu<span className="text-emerald-600 dark:text-emerald-400">Tayo</span>
+          Commu<span className="text-emerald-700 dark:text-emerald-400">Tayo</span>
         </h1>
         <span
           className={cn(
-            "mt-1 inline-flex max-w-full items-center gap-1 rounded-full px-2 py-0.5",
-            "text-[11px] font-semibold tracking-[0.12em] uppercase",
-            "bg-amber-500/10 text-amber-700 ring-1 ring-amber-500/20 dark:text-amber-300 dark:ring-amber-400/25"
+            "mt-1 inline-flex max-w-full items-center gap-1.5 px-2 py-0.5 text-xs font-medium",
+            RADIUS.pill,
+            "bg-amber-500/10 text-amber-800 ring-1 ring-amber-600/20 dark:text-amber-300 dark:ring-amber-400/25"
           )}
         >
-          <Zap className="size-3 shrink-0" aria-hidden />
-          <span className="truncate">Aguinaldo Highway Spine</span>
+          <Zap className={cn(ICON.xs, "shrink-0")} aria-hidden />
+          <span className="truncate">Aguinaldo Highway spine</span>
         </span>
       </div>
 
@@ -432,34 +588,39 @@ function AppHeader({ isDark, onToggleDark, onReport, canReport, reported, floati
         type="button"
         onClick={onReport}
         disabled={!canReport}
-        aria-label={reported ? "Report an update again for this route" : "Report an update for this route"}
+        aria-label={reported ? "Mag-ulat ulit tungkol sa rutang ito" : "Mag-ulat ng update sa rutang ito"}
         className={cn(
-          "flex h-11 shrink-0 items-center gap-1.5 rounded-2xl px-3",
-          "text-[13px] font-semibold transition-colors duration-150",
-          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40",
+          // min-w-11 matters below `sm`, where the label hides and the button would otherwise
+          // shrink to its icon plus padding, landing at 40px against a 44px minimum.
+          "flex h-11 min-w-11 shrink-0 items-center justify-center gap-1.5 px-3 text-sm font-semibold",
+          RADIUS.control,
+          PRESS,
+          FOCUS,
           "disabled:cursor-not-allowed disabled:opacity-40",
           reported
-            ? "bg-emerald-500/12 text-emerald-700 ring-1 ring-emerald-500/25 dark:text-emerald-300 dark:ring-emerald-400/25"
-            : "bg-zinc-900 text-zinc-50 ring-1 ring-black/[0.06] hover:bg-zinc-800 dark:bg-zinc-50 dark:text-zinc-900 dark:ring-white/10 dark:hover:bg-white"
+            ? "bg-emerald-500/12 text-emerald-800 ring-1 ring-emerald-600/25 dark:text-emerald-300 dark:ring-emerald-400/30"
+            : "bg-zinc-900 text-zinc-50 hover:bg-zinc-800 dark:bg-zinc-50 dark:text-zinc-900 dark:hover:bg-white"
         )}
       >
-        {reported ? <CircleCheck className="size-4" aria-hidden /> : <Megaphone className="size-4" aria-hidden />}
-        <span className="hidden sm:inline">{reported ? "Na-verify" : "Report Update"}</span>
+        {reported ? <CircleCheck className={ICON.sm} aria-hidden /> : <Megaphone className={ICON.sm} aria-hidden />}
+        <span className="hidden sm:inline">{reported ? "Na-verify" : "Mag-ulat"}</span>
       </button>
 
       <button
         type="button"
         onClick={onToggleDark}
-        aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
+        aria-label={isDark ? "Lumipat sa light mode" : "Lumipat sa dark mode"}
         aria-pressed={isDark}
         className={cn(
-          "flex size-11 shrink-0 items-center justify-center rounded-2xl",
-          "bg-white/70 text-zinc-600 ring-1 ring-black/[0.06] transition-colors duration-150 hover:text-zinc-900",
-          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-900/20",
-          "dark:bg-zinc-900/70 dark:text-zinc-300 dark:ring-white/10 dark:hover:text-zinc-50 dark:focus-visible:ring-white/25"
+          "flex size-11 shrink-0 items-center justify-center",
+          RADIUS.control,
+          "bg-white/70 text-zinc-700 ring-1 ring-zinc-900/[0.07] hover:text-zinc-900",
+          "dark:bg-zinc-900/70 dark:text-zinc-200 dark:ring-white/10 dark:hover:text-zinc-50",
+          PRESS,
+          FOCUS
         )}
       >
-        {isDark ? <Sun className="size-5" aria-hidden /> : <Moon className="size-5" aria-hidden />}
+        {isDark ? <Sun className={ICON.md} aria-hidden /> : <Moon className={ICON.md} aria-hidden />}
       </button>
     </header>
   )
@@ -479,9 +640,10 @@ interface MobileSheetProps {
 /**
  * A two-position sheet: fully open, or peeking with just the search bar showing.
  *
- * Dragging is bound to the grab handle (`dragListener={false}` + `dragControls`) rather than the
- * whole panel, so scrolling the steps inside — and the route card's own swipe-to-dismiss — never
- * fight the sheet for the same gesture.
+ * Dragging is bound to the grab handle (`dragListener={false}` plus `dragControls`) rather than the
+ * whole panel, so scrolling the steps inside, and the route card's own swipe-to-dismiss, never
+ * fight the sheet for the same gesture. The handle is also a real button, so the sheet is fully
+ * operable without ever performing a drag.
  */
 function MobileSheet({ expanded, onExpandedChange, reduceMotion, children }: MobileSheetProps) {
   const sheetRef = useRef<HTMLDivElement>(null)
@@ -504,8 +666,8 @@ function MobileSheet({ expanded, onExpandedChange, reduceMotion, children }: Mob
   const spring = reduceMotion ? { duration: 0 } : { type: "spring" as const, stiffness: 300, damping: 30 }
 
   const handleDragEnd = (_event: unknown, info: PanInfo) => {
-    // Project where the flick is heading rather than reading the finger's last position, so a
-    // fast short swipe still lands where the commuter meant it to.
+    // Project where the flick is heading rather than reading the finger's last position, so a fast
+    // short swipe still lands where the commuter meant it to.
     const projected = y.get() + info.velocity.y * 0.08
     onExpandedChange(projected < collapsedY / 2)
   }
@@ -524,10 +686,9 @@ function MobileSheet({ expanded, onExpandedChange, reduceMotion, children }: Mob
       onDragEnd={handleDragEnd}
       aria-label="Trip planner"
       className={cn(
-        "absolute inset-x-0 bottom-0 z-[1100] flex h-[86dvh] flex-col overflow-hidden rounded-t-3xl",
-        "bg-zinc-50/92 ring-1 ring-black/[0.06] backdrop-blur-md",
-        "shadow-[0_-1px_2px_rgba(0,0,0,0.04),0_-16px_40px_-20px_rgba(0,0,0,0.35)]",
-        "dark:bg-zinc-900/88 dark:ring-white/10"
+        "absolute inset-x-0 bottom-0 flex h-[86dvh] flex-col overflow-hidden rounded-t-3xl",
+        Z.sheet,
+        GLASS_STRONG
       )}
     >
       <button
@@ -535,17 +696,17 @@ function MobileSheet({ expanded, onExpandedChange, reduceMotion, children }: Mob
         onClick={() => onExpandedChange(!expanded)}
         onPointerDown={(event) => dragControls.start(event)}
         aria-expanded={expanded}
-        aria-label={expanded ? "Collapse the trip planner" : "Expand the trip planner"}
-        className="flex h-11 w-full shrink-0 touch-none items-center justify-center gap-2 active:cursor-grabbing"
+        aria-label={expanded ? "Isara ang trip planner" : "Buksan ang trip planner"}
+        className={cn("flex h-11 w-full shrink-0 touch-none items-center justify-center gap-2 active:cursor-grabbing", FOCUS)}
       >
-        <span className="h-1.5 w-10 rounded-full bg-zinc-300 dark:bg-zinc-700" aria-hidden />
+        <span className="h-1.5 w-10 rounded-full bg-zinc-400/50 dark:bg-zinc-600" aria-hidden />
         <motion.span
           animate={{ rotate: expanded ? 180 : 0 }}
           transition={reduceMotion ? { duration: 0 } : { duration: 0.2, ease: "easeOut" }}
-          className="text-zinc-400 dark:text-zinc-500"
+          className="text-zinc-500 dark:text-zinc-400"
           aria-hidden
         >
-          <ChevronUp className="size-4" />
+          <ChevronUp className={ICON.sm} />
         </motion.span>
       </button>
 
@@ -583,66 +744,66 @@ function FeedbackDialog({
     <Dialog open={open} onOpenChange={(next) => onOpenChange(next)}>
       <DialogContent
         showCloseButton={false}
-        className="gap-3 rounded-3xl bg-zinc-50 p-5 ring-black/[0.06] sm:max-w-md dark:bg-zinc-900 dark:ring-white/10"
+        className={cn("gap-3 bg-zinc-50 p-5 ring-zinc-900/[0.07] sm:max-w-md dark:bg-zinc-900 dark:ring-white/10", RADIUS.panel)}
       >
         <DialogHeader>
-          <DialogTitle className="text-base font-bold tracking-tight">Verify Route</DialogTitle>
-          <DialogDescription className="text-[13px] leading-relaxed text-zinc-500 dark:text-zinc-400">
+          <DialogTitle className="text-base font-bold tracking-tight">I-verify ang ruta</DialogTitle>
+          <DialogDescription className="text-sm leading-relaxed text-zinc-600 dark:text-zinc-300">
             Isang tap lang. Ang sagot mo ang nagpapatino ng pamasahe para sa susunod na sasakay.
           </DialogDescription>
         </DialogHeader>
 
         {route !== null && originName !== null && destName !== null && (
-          <div className="rounded-2xl bg-zinc-100/80 px-3 py-2.5 ring-1 ring-black/[0.04] dark:bg-zinc-800/60 dark:ring-white/10">
-            <p className="truncate text-[13px] font-semibold text-zinc-700 dark:text-zinc-200">
-              {originName} <span className="text-zinc-400 dark:text-zinc-500">&rarr;</span> {destName}
+          <div className={cn("px-3.5 py-3", RADIUS.control, INSET)}>
+            <p className="truncate text-sm font-semibold text-zinc-800 dark:text-zinc-100">
+              {originName} <span className="text-zinc-600 dark:text-zinc-300">&rarr;</span> {destName}
             </p>
-            <p className="mt-0.5 text-[11px] font-semibold tracking-[0.1em] text-zinc-400 uppercase dark:text-zinc-500">
-              {peso(route.totalFare)} &middot; {route.totalDurationMin} min &middot; {route.confidence}% kumpiyansa
+            <p className="mt-1 text-xs font-medium text-zinc-600 dark:text-zinc-300">
+              {formatPeso(route.totalFare)} &middot; {formatDuration(route.totalDurationMin)}
             </p>
+            <p className="text-xs font-medium text-zinc-600 dark:text-zinc-300">{route.confidence}% verified</p>
           </div>
         )}
 
         <div className="flex flex-col gap-2">
           {FEEDBACK_OPTIONS.map((option) => (
-            <motion.button
+            <button
               key={option.id}
               type="button"
-              whileTap={{ scale: 0.985 }}
-              transition={{ duration: 0.12, ease: "easeOut" }}
               onClick={() => onSubmit(option)}
               className={cn(
-                "flex min-h-14 w-full items-center gap-3 rounded-2xl px-3.5 py-2.5 text-left",
-                "ring-1 transition-colors duration-150",
-                "focus-visible:outline-none focus-visible:ring-2",
+                "flex min-h-14 w-full items-center gap-3 px-3.5 py-2.5 text-left ring-1",
+                RADIUS.control,
+                PRESS,
+                FOCUS,
                 option.tone,
                 alreadyReported === option.id && "ring-2"
               )}
             >
-              <span className="text-lg leading-none" aria-hidden>
-                {option.emoji}
-              </span>
+              <option.Icon className={cn(ICON.md, "shrink-0")} aria-hidden />
               <span className="min-w-0 flex-1">
                 <span className="block truncate text-sm font-semibold">{option.label}</span>
-                <span className="block truncate text-xs text-zinc-500 dark:text-zinc-400">{option.hint}</span>
+                <span className="block truncate text-xs text-zinc-600 dark:text-zinc-300">{option.hint}</span>
               </span>
-              {alreadyReported === option.id && <CircleCheck className="size-4 shrink-0" aria-hidden />}
-            </motion.button>
+              {alreadyReported === option.id && <CircleCheck className={cn(ICON.sm, "shrink-0")} aria-hidden />}
+            </button>
           ))}
         </div>
 
-        <p className="text-center text-[11px] leading-relaxed text-zinc-400 dark:text-zinc-500">
-          Sa session mo lang naitatabi ang ulat sa ngayon &mdash; wala pang server na pinapadalhan.
+        <p className="text-center text-xs leading-relaxed text-zinc-600 dark:text-zinc-300">
+          Sa session mo lang naitatabi ang ulat sa ngayon. Wala pang server na pinapadalhan.
         </p>
 
         <button
           type="button"
           onClick={() => onOpenChange(false)}
           className={cn(
-            "h-11 w-full rounded-2xl text-sm font-semibold",
-            "bg-zinc-200/70 text-zinc-700 transition-colors duration-150 hover:bg-zinc-200",
-            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-900/20",
-            "dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700 dark:focus-visible:ring-white/25"
+            "h-11 w-full text-sm font-semibold",
+            RADIUS.control,
+            "bg-zinc-200/70 text-zinc-800 hover:bg-zinc-200",
+            "dark:bg-zinc-800 dark:text-zinc-100 dark:hover:bg-zinc-700",
+            PRESS,
+            FOCUS
           )}
         >
           Hindi muna
@@ -653,12 +814,127 @@ function FeedbackDialog({
 }
 
 // ---------------------------------------------------------------------------
-// Toast + fallback
+// Live trip tracking bar
 // ---------------------------------------------------------------------------
 
-function ToastBanner({ toast, reduceMotion }: { toast: ToastState | null; reduceMotion: boolean }) {
+const GEO_STATUS_COPY: Partial<Record<GeolocationStatus, string>> = {
+  denied: "Naka-block ang location access. Payagan ito sa settings ng browser para gumana ang live tracking.",
+  unsupported: "Hindi suportado ng browser na ito ang live na GPS tracking.",
+  error: "May problema sa pagkuha ng lokasyon. Subukan ulit.",
+}
+
+interface TripTrackingBarProps {
+  route: RouteResult
+  geoStatus: GeolocationStatus
+  progress: TripProgress | null
+  onStart: () => void
+  onStop: () => void
+}
+
+/**
+ * A persistent strip under the sakay guide: start and stop live GPS tracking, see how far to the
+ * next drop-off, and, the thing a commuter actually scans for on a moving road, which signboard to
+ * be watching for right now. Separate from RouteResultCard because tracking is a device concern
+ * (permissions, a live watch) that outlives any one step being expanded or collapsed.
+ */
+function TripTrackingBar({ route, geoStatus, progress, onStart, onStop }: TripTrackingBarProps) {
+  const isActive = geoStatus === "requesting" || geoStatus === "active"
+  const isWaitingForFix = isActive && progress === null
+  const currentStep = progress !== null ? route.steps[progress.stepIndex] : null
+  const statusCopy = GEO_STATUS_COPY[geoStatus]
+
+  return (
+    <div className={cn("w-full max-w-md p-3.5", RADIUS.panel, GLASS)}>
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          {statusCopy !== undefined && (
+            <p className="text-xs leading-relaxed font-medium text-rose-700 dark:text-rose-400">{statusCopy}</p>
+          )}
+
+          {statusCopy === undefined && !isActive && (
+            <p className="text-xs leading-relaxed font-medium text-zinc-600 dark:text-zinc-300">
+              Buksan ang GPS para makita kung nasaan ka na sa ruta, at para may abiso bago ang babaan mo.
+            </p>
+          )}
+
+          {/* A real pending state rather than a dead panel: the first GPS fix can take many
+              seconds, and silence during that wait reads as a broken button. */}
+          {statusCopy === undefined && isWaitingForFix && (
+            <p className="flex items-center gap-2 text-xs font-medium text-zinc-600 dark:text-zinc-300">
+              <LoaderCircle className={cn(ICON.xs, "animate-spin motion-reduce:animate-none")} aria-hidden />
+              Hinahanap ang lokasyon mo
+            </p>
+          )}
+
+          {statusCopy === undefined && isActive && progress !== null && currentStep !== null && (
+            <>
+              <p className="truncate text-sm font-bold text-zinc-900 dark:text-zinc-50">
+                {progress.onRoute ? `Patungo sa ${currentStep.to}` : "Wala ka sa ruta ngayon"}
+              </p>
+              <p className="text-xs tabular-nums text-zinc-600 dark:text-zinc-300">
+                {progress.onRoute
+                  ? `${formatMeters(progress.distanceToStepEndMeters)} na lang sa susunod na baba`
+                  : "Subukang bumalik sa daan ng ruta"}
+              </p>
+            </>
+          )}
+        </div>
+
+        <button
+          type="button"
+          onClick={isActive ? onStop : onStart}
+          aria-pressed={isActive}
+          className={cn(
+            "flex min-h-11 shrink-0 items-center gap-1.5 px-3.5 text-sm font-semibold",
+            RADIUS.control,
+            PRESS,
+            FOCUS,
+            isActive
+              ? "bg-rose-500/12 text-rose-800 ring-1 ring-rose-600/25 hover:bg-rose-500/20 dark:text-rose-300 dark:ring-rose-400/30"
+              : "bg-zinc-900 text-zinc-50 hover:bg-zinc-800 dark:bg-zinc-50 dark:text-zinc-900 dark:hover:bg-white"
+          )}
+        >
+          {isActive ? <Square className={ICON.sm} aria-hidden /> : <Navigation className={ICON.sm} aria-hidden />}
+          {isActive ? "Ihinto" : "Simulan"}
+        </button>
+      </div>
+
+      {/* The one thing worth scanning a moving road for: what is painted on the vehicle. */}
+      {isActive && currentStep !== null && currentStep.mode !== "walk" && (
+        <div className={cn("mt-3 flex flex-wrap items-center gap-2 px-3 py-2.5", RADIUS.control, INSET)}>
+          {(() => {
+            const meta = MODE_META[currentStep.mode]
+            return (
+              <>
+                <meta.Icon className={cn(ICON.sm, "shrink-0")} style={{ color: meta.hex }} aria-hidden />
+                <span className="text-xs font-semibold text-zinc-600 dark:text-zinc-300">Hanapin ito:</span>
+                <PlacardTag text={currentStep.placardText} size="sm" />
+              </>
+            )
+          })()}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Toast and fallback
+// ---------------------------------------------------------------------------
+
+function ToastBanner({
+  toast,
+  reduceMotion,
+  onDismiss,
+}: {
+  toast: ToastState | null
+  reduceMotion: boolean
+  onDismiss: () => void
+}) {
   const spring = reduceMotion ? { duration: 0 } : { type: "spring" as const, stiffness: 300, damping: 30 }
   const exit = reduceMotion ? { duration: 0 } : { duration: 0.15, ease: "easeOut" as const }
+  const isCelebration = toast?.kind === "celebration"
+  const isAlert = toast?.kind === "alert"
 
   return (
     <AnimatePresence>
@@ -667,20 +943,70 @@ function ToastBanner({ toast, reduceMotion }: { toast: ToastState | null; reduce
           key={toast.id}
           role="status"
           aria-live="polite"
-          initial={{ opacity: 0, y: -12, scale: 0.97 }}
+          initial={{ opacity: 0, y: -12, scale: 0.96 }}
           animate={{ opacity: 1, y: 0, scale: 1 }}
           exit={{ opacity: 0, y: -8, scale: 0.98, transition: exit }}
           transition={spring}
           className={cn(
-            "fixed top-24 left-1/2 z-[1200] flex w-[calc(100%-2rem)] max-w-sm -translate-x-1/2 items-center gap-2.5",
-            "rounded-2xl px-3.5 py-3 lg:top-6",
-            "bg-zinc-50/95 ring-1 ring-black/[0.06] backdrop-blur-md",
-            "shadow-[0_1px_2px_rgba(0,0,0,0.04),0_16px_40px_-20px_rgba(0,0,0,0.4)]",
-            "dark:bg-zinc-900/95 dark:ring-white/10"
+            "fixed left-1/2 w-[calc(100%-2rem)] max-w-sm -translate-x-1/2",
+            "top-[max(6rem,calc(env(safe-area-inset-top)+5.5rem))] lg:top-6",
+            Z.toast,
+            RADIUS.control,
+            // The 250 m warning gets a near-black card with an amber rule so it reads at a glance
+            // in direct sunlight through a jeepney window. Everything else stays a quiet glass pill.
+            isAlert
+              ? "border-l-4 border-amber-400 bg-zinc-950/95 text-zinc-50 shadow-2xl shadow-black/50 backdrop-blur-xl"
+              : cn(GLASS_STRONG, "text-zinc-900 dark:text-zinc-50"),
+            isCelebration ? "flex flex-col items-center gap-1.5 px-5 py-5 text-center" : "flex items-start gap-2.5 px-3.5 py-3"
           )}
         >
-          <toast.Icon className={cn("size-5 shrink-0", toast.tone)} aria-hidden />
-          <p className="text-[13px] leading-snug font-medium text-zinc-700 dark:text-zinc-200">{toast.message}</p>
+          <span
+            className={cn(
+              "flex shrink-0 items-center justify-center",
+              isCelebration &&
+                "size-11 rounded-full bg-emerald-500/12 ring-1 ring-emerald-600/25 dark:bg-emerald-400/15 dark:ring-emerald-400/30"
+            )}
+          >
+            <toast.Icon className={cn(ICON.md, "shrink-0", toast.tone)} aria-hidden />
+          </span>
+
+          <div className={cn("min-w-0", isCelebration ? "" : "flex-1")}>
+            <p
+              className={cn(
+                isCelebration ? "text-base font-bold" : isAlert ? "text-sm leading-snug font-bold" : "text-sm leading-snug font-medium"
+              )}
+            >
+              {toast.message}
+            </p>
+            {toast.detail !== undefined && (
+              <p
+                className={cn(
+                  "mt-1 text-xs leading-relaxed",
+                  isAlert ? "text-zinc-300" : "text-zinc-600 dark:text-zinc-300"
+                )}
+              >
+                {toast.detail}
+              </p>
+            )}
+          </div>
+
+          {/* A toast that buzzes the phone needs a way to be put away on purpose. */}
+          {!isCelebration && (
+            <button
+              type="button"
+              onClick={onDismiss}
+              aria-label="Isara ang abiso"
+              className={cn(
+                "-my-1 -mr-1.5 flex size-11 shrink-0 items-center justify-center",
+                RADIUS.pill,
+                isAlert ? "text-zinc-400 hover:text-zinc-50" : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-50",
+                PRESS,
+                FOCUS
+              )}
+            >
+              <CircleX className={ICON.sm} aria-hidden />
+            </button>
+          )}
         </motion.div>
       )}
     </AnimatePresence>
@@ -690,21 +1016,22 @@ function ToastBanner({ toast, reduceMotion }: { toast: ToastState | null; reduce
 function PaneFallback({ title, body, onRetry }: { title: string; body: string; onRetry: () => void }) {
   return (
     <div className="flex h-full w-full items-center justify-center p-6">
-      <div className="w-full max-w-sm rounded-3xl bg-zinc-50/90 p-5 text-center ring-1 ring-black/[0.06] backdrop-blur-md dark:bg-zinc-900/85 dark:ring-white/10">
-        <TriangleAlert className="mx-auto size-6 text-amber-500" aria-hidden />
-        <h2 className="mt-3 text-sm font-bold tracking-tight text-zinc-800 dark:text-zinc-100">{title}</h2>
-        <p className="mt-1 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">{body}</p>
+      <div className={cn("w-full max-w-sm p-5 text-center", RADIUS.panel, GLASS)}>
+        <TriangleAlert className={cn(ICON.md, "mx-auto text-amber-600 dark:text-amber-400")} aria-hidden />
+        <h2 className="mt-3 text-sm font-bold tracking-tight text-zinc-900 dark:text-zinc-50">{title}</h2>
+        <p className="mt-1 text-xs leading-relaxed text-zinc-600 dark:text-zinc-300">{body}</p>
         <button
           type="button"
           onClick={onRetry}
           className={cn(
-            "mt-4 inline-flex h-11 items-center gap-1.5 rounded-2xl px-4 text-sm font-semibold",
-            "bg-zinc-900 text-zinc-50 transition-colors duration-150 hover:bg-zinc-800",
-            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-900/20",
-            "dark:bg-zinc-50 dark:text-zinc-900 dark:hover:bg-white dark:focus-visible:ring-white/25"
+            "mt-4 inline-flex h-11 items-center gap-1.5 px-4 text-sm font-semibold",
+            RADIUS.control,
+            "bg-zinc-900 text-zinc-50 hover:bg-zinc-800 dark:bg-zinc-50 dark:text-zinc-900 dark:hover:bg-white",
+            PRESS,
+            FOCUS
           )}
         >
-          <RefreshCw className="size-4" aria-hidden />
+          <RefreshCw className={ICON.sm} aria-hidden />
           Subukan ulit
         </button>
       </div>

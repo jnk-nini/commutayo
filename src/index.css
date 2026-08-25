@@ -125,10 +125,39 @@
   * {
     @apply border-border outline-ring/50;
     }
+  /* The app shell paints its own zinc-100/zinc-950 background over the full viewport, but a
+     mobile overscroll bounce or the first unstyled paint exposes body's background underneath it.
+     shadcn's default --background is pure white/near-black, and a flash of pure white against an
+     otherwise muted, low-contrast UI is exactly the "too bright" edge worth closing. */
   body {
-    @apply bg-background text-foreground;
+    @apply bg-zinc-100 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-50;
+    /* The planner is a fixed-height app shell, not a document. Nothing should ever scroll
+       sideways, and the sheet's own scroller should not rubber-band the page behind it. */
+    overflow-x: hidden;
+    overscroll-behavior-y: none;
     }
   html {
     @apply font-sans;
+    }
+
+  /* One stroke weight for every icon in the app. lucide ships at 2, which reads heavy next to
+     Geist at the sizes used here and makes a 14px icon look like a different family than a 20px
+     one. Set once, globally, rather than passed as a prop at ~200 call sites. */
+  svg.lucide {
+    stroke-width: 1.75;
+    }
+
+  /* A blanket floor under the per-component useReducedMotion() checks. Framer Motion covers the
+     animations it owns; this catches CSS keyframes (the live-location pulse, the GPS spinner) and
+     anything added later that forgets to ask. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+      }
     }
 }
