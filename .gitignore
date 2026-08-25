@@ -34,3 +34,4 @@ scripts/.ingest-output/sql_batches/
 *.njsproj
 *.sln
 *.sw?
+live-check.out.txt

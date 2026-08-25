@@ -1,4 +1,8 @@
-// "Ipakita kay Manong": the phrase, big enough to hold up inside a noisy jeepney.
+// The phrase to show the driver, big enough to hold up inside a noisy jeepney.
+//
+// The phrase itself stays in Tagalog. It is not UI copy -- it is the sentence the commuter
+// says out loud to a Filipino jeepney driver, and translating it would break the one thing
+// this screen exists to do. Everything around it is English.
 //
 // This used to be a full-screen blackout. That version worked as a sign and failed as an interface:
 // the map, the route and every other control vanished, so a commuter who opened it mid-ride lost
@@ -111,12 +115,12 @@ export function DriverCard({ content, onDismiss }: DriverCardProps) {
             <div className="flex items-start justify-between gap-3 px-5 pt-3">
               <p className="flex items-center gap-2 text-sm font-semibold text-zinc-400">
                 <Megaphone className={ICON.sm} aria-hidden />
-                Ipakita o sabihin kay Manong
+                Show this to the driver, or say it
               </p>
               <button
                 type="button"
                 onClick={onDismiss}
-                aria-label="Isara"
+                aria-label="Close"
                 className={cn(
                   "-mt-2 -mr-2 flex size-11 shrink-0 items-center justify-center text-zinc-400",
                   "hover:bg-white/10 hover:text-zinc-50",
@@ -141,12 +145,12 @@ export function DriverCard({ content, onDismiss }: DriverCardProps) {
               {content.placardText.length > 0 && <PlacardTag text={content.placardText} size="sm" />}
               <span className="inline-flex items-center gap-1.5 text-sm font-medium text-zinc-300">
                 <MapPin className={cn(ICON.xs, "text-zinc-500")} aria-hidden />
-                Baba sa {content.dropOff}
+                Get off at {content.dropOff}
               </span>
             </div>
 
             <p className="px-5 pt-4 text-xs text-zinc-400">
-              Nananatiling nakikita ang mapa sa likod nito. I-swipe pababa o pindutin ang X para bumalik.
+              The map is still visible behind this. Swipe down or press X to go back.
             </p>
           </motion.div>
         </motion.div>

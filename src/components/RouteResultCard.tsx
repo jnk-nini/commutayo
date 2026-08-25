@@ -1,4 +1,4 @@
-// The sakay guide: the card a commuter actually reads on the street.
+// The ride guide: the card a commuter actually reads on the street.
 //
 // It has two faces. While planning or riding it shows the fare, the clock, and one continuous
 // vertical timeline running from the origin pin to the destination flag, with every ride and every
@@ -37,7 +37,6 @@ import DriverCard, { type DriverCardContent } from "@/components/DriverCard"
 import PlacardTag from "@/components/PlacardTag"
 import { cn } from "@/lib/utils"
 import {
-  FARE_CLASSES,
   discountedFare,
   discountedTotalFare,
   fareClassOption,
@@ -165,8 +164,8 @@ export function RouteResultCard({
       onDragEnd={canDrag ? handleDragEnd : undefined}
       aria-label={
         completed
-          ? `Tapos na ang biyahe mula ${origin} papuntang ${destination}`
-          : `Rutang ${priorityStyle.hint.toLowerCase()} mula ${origin} papuntang ${destination}`
+          ? `Trip finished, ${origin} to ${destination}`
+          : `${priorityStyle.hint} route from ${origin} to ${destination}`
       }
       className={cn("relative w-full max-w-md overflow-hidden", RADIUS.panel, GLASS, className)}
     >
@@ -225,7 +224,7 @@ export function RouteResultCard({
                 <button
                   type="button"
                   onClick={onClose}
-                  aria-label="Isara ang ruta"
+                  aria-label="Close this route"
                   className={cn(
                     "-mt-1 -mr-2 flex size-11 shrink-0 items-center justify-center text-zinc-500",
                     "hover:bg-zinc-900/5 hover:text-zinc-900",
@@ -255,7 +254,7 @@ export function RouteResultCard({
                   {formatPeso(route.totalFare)}
                 </span>
               )}
-              <p className="text-sm font-medium text-zinc-600 dark:text-zinc-300">total pamasahe</p>
+              <p className="text-sm font-medium text-zinc-600 dark:text-zinc-300">total fare</p>
             </div>
 
             {origin !== "" && (
@@ -268,54 +267,49 @@ export function RouteResultCard({
                   is the difference between a helpful estimate and a wrong promise. */}
             <p className="mt-2 flex items-start gap-1.5 text-xs leading-snug text-zinc-600 dark:text-zinc-300">
               <Info className={cn(ICON.xs, "mt-px shrink-0")} aria-hidden />
-              <span>Tantiya lang, {fareOption.description.toLowerCase()}. Maaaring mag-iba ang singil ng driver.</span>
+              <span>Estimate only, at the {fareOption.description}. The driver may charge differently.</span>
             </p>
 
-            {/* --------------------------------------------------- Fare class toggle */}
-            <div role="group" aria-label="Uri ng pamasahe" className="mt-3 flex gap-1.5">
-              {FARE_CLASSES.map((option) => {
-                const isActive = option.id === activeFareClass
-                return (
-                  <button
-                    key={option.id}
-                    type="button"
-                    onClick={() => chooseFareClass(option.id)}
-                    aria-pressed={isActive}
-                    className={cn(
-                      "relative min-h-11 flex-1 px-2 text-xs font-semibold",
-                      RADIUS.control,
-                      PRESS,
-                      FOCUS,
-                      isActive
-                        ? "text-zinc-50 dark:text-zinc-900"
-                        : "text-zinc-700 hover:bg-zinc-900/5 dark:text-zinc-300 dark:hover:bg-white/[0.06]",
-                    )}
-                  >
-                    {isActive && (
-                      <motion.span
-                        layoutId="fare-class-pill"
-                        transition={spring}
-                        className={cn("absolute inset-0 -z-10 bg-zinc-900 dark:bg-zinc-50", RADIUS.control)}
-                      />
-                    )}
-                    {option.label}
-                  </button>
-                )
-              })}
-            </div>
+            {/* ------------------------------------------------------ Fare discount */}
+            {/* One checkbox, not three chips. Student, senior citizen and PWD are all the same
+                20% off the same fare, so asking which one you are changed the width of the card
+                and nothing else. See FARE_CLASSES in fares.ts. */}
+            <label
+              className={cn(
+                "mt-3 flex min-h-11 w-full cursor-pointer items-center gap-2.5 px-3 py-2",
+                RADIUS.control,
+                "ring-1 ring-zinc-900/10 dark:ring-white/10",
+                "hover:bg-zinc-900/[0.03] dark:hover:bg-white/[0.04]",
+                "focus-within:ring-2 focus-within:ring-emerald-600/40",
+                PRESS,
+              )}
+            >
+              <input
+                type="checkbox"
+                checked={activeFareClass === "discounted"}
+                onChange={(event) => chooseFareClass(event.target.checked ? "discounted" : "regular")}
+                className="size-4 shrink-0 accent-emerald-600 dark:accent-emerald-400"
+              />
+              <span className="min-w-0 flex-1 text-xs font-semibold text-zinc-700 dark:text-zinc-200">
+                Student / Senior / PWD discount
+              </span>
+              <span className="shrink-0 text-xs font-semibold tabular-nums text-emerald-700 dark:text-emerald-400">
+                20% off
+              </span>
+            </label>
 
             {/* Three numbers, no boxes. Card containers here added chrome without adding meaning. */}
             <dl className="mt-4 flex divide-x divide-zinc-900/10 dark:divide-white/10">
-              <Stat Icon={Clock} label="Biyahe" value={formatDuration(route.totalDurationMin)} first />
+              <Stat Icon={Clock} label="Travel time" value={formatDuration(route.totalDurationMin)} first />
               <Stat
                 Icon={Repeat}
-                label="Lipat"
-                value={route.transferCount === 0 ? "Direkta" : `${route.transferCount}x`}
+                label="Transfers"
+                value={route.transferCount === 0 ? "Direct ride" : `${route.transferCount}x`}
               />
               <Stat
                 Icon={Footprints}
-                label="Lakad"
-                value={route.walkingMinutes === 0 ? "Wala" : formatDuration(route.walkingMinutes)}
+                label="Walking"
+                value={route.walkingMinutes === 0 ? "None" : formatDuration(route.walkingMinutes)}
               />
             </dl>
 
@@ -327,7 +321,7 @@ export function RouteResultCard({
                   "bg-zinc-900/5 text-zinc-700 ring-zinc-900/10",
                   "dark:bg-white/[0.06] dark:text-zinc-300 dark:ring-white/10",
                 )}
-                title="Kung gaano karami sa landmark data ng rutang ito ang na-verify sa corridor spec"
+                title="How much of this route’s landmark data has been checked against a surveyed source"
               >
                 <span
                   aria-hidden
@@ -338,7 +332,7 @@ export function RouteResultCard({
                 <ShieldCheck className={ICON.xs} aria-hidden />
               </span>
               <span className="text-xs text-zinc-600 dark:text-zinc-300">
-                {route.steps.length} sakay {formatMeters(totalMeters)}
+                {route.steps.length === 1 ? "1 ride" : `${route.steps.length} rides`} · {formatMeters(totalMeters)}
               </span>
             </div>
           </header>
@@ -504,23 +498,23 @@ function StepRow({ step, index, isExpanded, onToggle, onShowDriver, fareClass, s
             </span>
 
             {/* Board and drop-off both live in the collapsed row: scanning the closed timeline
-                should already answer "saan ako sasakay, saan ako bababa". */}
+                should already answer "where do I get on, where do I get off". */}
             <span className="mt-1.5 block truncate text-base font-bold text-zinc-900 dark:text-zinc-50">
-              {isWalk ? "Lakad mula " : "Sakay sa "}
+              {isWalk ? "Walk from " : "Board at "}
               {step.from}
             </span>
             <span className="mt-0.5 flex items-center gap-1.5 text-sm text-zinc-700 dark:text-zinc-200">
               <MapPin className={cn(ICON.xs, "shrink-0 text-zinc-400 dark:text-zinc-500")} aria-hidden />
-              <span className="truncate">Baba sa {step.to}</span>
+              <span className="truncate">Get off at {step.to}</span>
             </span>
 
             <span className="mt-2 flex flex-wrap items-center gap-2 text-xs text-zinc-600 dark:text-zinc-300">
               <span className={cn("px-2 py-0.5 font-semibold tabular-nums ring-1", RADIUS.pill, mode.chip)}>
-                {payable === 0 ? "Libre" : formatPeso(payable)}
+                {payable === 0 ? "Free" : formatPeso(payable)}
               </span>
               <span className="tabular-nums">{formatDuration(step.durationMin)}</span>
               <span className="tabular-nums">{formatMeters(step.distanceMeters)}</span>
-              {step.viaStops.length > 0 && <span className="tabular-nums">{step.viaStops.length} hinto sa daan</span>}
+              {step.viaStops.length > 0 && <span className="tabular-nums">{step.viaStops.length} stops on the way</span>}
             </span>
           </span>
 
@@ -554,16 +548,16 @@ function StepRow({ step, index, isExpanded, onToggle, onShowDriver, fareClass, s
                     INSET,
                   )}
                 >
-                  <DetailRow Icon={Signpost} label={isWalk ? "Saan magsisimula" : "Saan tumayo at maghintay"}>
+                  <DetailRow Icon={Signpost} label={isWalk ? "Where to start" : "Where to wait"}>
                     <p className="text-sm leading-relaxed text-zinc-800 dark:text-zinc-100">{step.boardingSpot}</p>
                   </DetailRow>
 
                   {!isWalk && (
-                    <DetailRow Icon={mode.Icon} label="Hanapin ang ganitong sasakyan">
+                    <DetailRow Icon={mode.Icon} label="Look for this vehicle">
                       <PlacardTag text={step.placardText} size="lg" />
                       {step.alternatePlacards.length > 0 && (
                         <div className="mt-2">
-                          <p className="text-xs text-zinc-600 dark:text-zinc-300">Pwede rin ang ganitong signboard:</p>
+                          <p className="text-xs text-zinc-600 dark:text-zinc-300">This signboard also works:</p>
                           <div className="mt-1.5 flex flex-wrap gap-1.5">
                             {step.alternatePlacards.map((alternate) => (
                               <PlacardTag key={alternate} text={alternate} size="sm" />
@@ -574,7 +568,7 @@ function StepRow({ step, index, isExpanded, onToggle, onShowDriver, fareClass, s
                     </DetailRow>
                   )}
 
-                  <DetailRow Icon={MapPin} label="Babaan at landmark">
+                  <DetailRow Icon={MapPin} label="Where to get off">
                     <p className="text-base font-bold leading-snug text-zinc-900 dark:text-zinc-50">{step.to}</p>
                     {step.landmarkCues.length > 0 && (
                       <ul className="mt-1.5 flex flex-wrap gap-1.5">
@@ -594,13 +588,13 @@ function StepRow({ step, index, isExpanded, onToggle, onShowDriver, fareClass, s
                     )}
                     {step.viaStops.length > 0 && (
                       <p className="mt-2 text-sm text-zinc-700 dark:text-zinc-200">
-                        Dadaan sa {step.viaStops.join(", ")}.
+                        Passes {step.viaStops.join(", ")}.
                       </p>
                     )}
                     {!step.landmarkVerified && (
                       <p className="mt-2 flex items-start gap-1.5 text-xs leading-relaxed text-amber-800 dark:text-amber-300">
                         <TriangleAlert className={cn(ICON.xs, "mt-px shrink-0")} aria-hidden />
-                        Hindi pa na-verify ang babaan na ito. Tanungin si Manong para sigurado.
+                        This drop-off point has not been checked yet. Ask the driver to be sure.
                       </p>
                     )}
                   </DetailRow>
@@ -611,7 +605,7 @@ function StepRow({ step, index, isExpanded, onToggle, onShowDriver, fareClass, s
                 <div className={cn("px-3.5 py-3", RADIUS.control, "bg-zinc-900 text-zinc-50 dark:bg-zinc-800")}>
                   <p className="flex items-center gap-1.5 text-xs font-semibold text-zinc-400">
                     <Megaphone className={ICON.xs} aria-hidden />
-                    Sabihin kay Manong
+                    Say this to the driver
                   </p>
                   <p className="mt-1.5 text-base leading-snug font-bold">&ldquo;{step.driverPhrase}&rdquo;</p>
 
@@ -628,7 +622,7 @@ function StepRow({ step, index, isExpanded, onToggle, onShowDriver, fareClass, s
                       )}
                     >
                       <Megaphone className={ICON.sm} aria-hidden />
-                      Ipakita kay Manong
+                      Show the driver
                     </button>
                     <CopyPhraseButton phrase={step.driverPhrase} />
                   </div>
@@ -693,7 +687,7 @@ function TripSummary({
         </span>
         <div className="min-w-0 flex-1">
           <h2 className="text-lg leading-tight font-bold tracking-tight text-zinc-900 dark:text-zinc-50">
-            Tapos na ang biyahe
+            Trip finished
           </h2>
           <p className="truncate text-sm text-zinc-600 dark:text-zinc-300">
             {origin} <span aria-hidden>&rarr;</span> {destination}
@@ -702,7 +696,7 @@ function TripSummary({
       </div>
 
       <div className={cn("mt-4 px-4 py-3.5", RADIUS.control, INSET)}>
-        <p className="text-sm font-medium text-zinc-600 dark:text-zinc-300">Kabuuang pamasahe</p>
+        <p className="text-sm font-medium text-zinc-600 dark:text-zinc-300">Total fare paid</p>
         <p className="mt-1 text-[34px] leading-none font-bold tracking-tight tabular-nums text-zinc-900 dark:text-zinc-50">
           {formatPeso(payable)}
         </p>
@@ -710,9 +704,9 @@ function TripSummary({
       </div>
 
       <dl className="mt-4 flex divide-x divide-zinc-900/10 dark:divide-white/10">
-        <Stat Icon={Clock} label="Tagal" value={formatDuration(route.totalDurationMin)} first />
-        <Stat Icon={Repeat} label="Lipat" value={route.transferCount === 0 ? "Direkta" : `${route.transferCount}x`} />
-        <Stat Icon={MapPin} label="Layo" value={formatMeters(totalMeters)} />
+        <Stat Icon={Clock} label="Took" value={formatDuration(route.totalDurationMin)} first />
+        <Stat Icon={Repeat} label="Transfers" value={route.transferCount === 0 ? "Direct ride" : `${route.transferCount}x`} />
+        <Stat Icon={MapPin} label="Distance" value={formatMeters(totalMeters)} />
       </dl>
 
       <ul className="mt-4 space-y-1.5">
@@ -726,7 +720,7 @@ function TripSummary({
               <mode.Icon className={cn(ICON.sm, "shrink-0")} style={{ color: mode.hex }} aria-hidden />
               <span className="min-w-0 flex-1 truncate">{step.to}</span>
               <span className="shrink-0 font-semibold tabular-nums">
-                {step.fare === 0 ? "Libre" : formatPeso(discountedFare(step.fare, fareClass))}
+                {step.fare === 0 ? "Free" : formatPeso(discountedFare(step.fare, fareClass))}
               </span>
             </li>
           )
@@ -748,7 +742,7 @@ function TripSummary({
             )}
           >
             <TriangleAlert className={ICON.sm} aria-hidden />
-            May mali sa pamasahe o ruta
+            Report a wrong fare or route
           </button>
         )}
 
@@ -766,7 +760,7 @@ function TripSummary({
             )}
           >
             <RotateCcw className={ICON.sm} aria-hidden />
-            Maghanap ng bagong biyahe
+            Plan another trip
           </button>
         )}
       </div>
@@ -804,7 +798,7 @@ function CopyPhraseButton({ phrase }: { phrase: string }) {
     <button
       type="button"
       onClick={copy}
-      aria-label={copied ? "Nakopya ang parirala" : "Kopyahin ang parirala"}
+      aria-label={copied ? "Phrase copied" : "Copy the phrase"}
       className={cn(
         "flex size-11 shrink-0 items-center justify-center",
         RADIUS.control,

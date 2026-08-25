@@ -1,7 +1,7 @@
 // CommuTayo MVP shell for the Aguinaldo Highway pilot corridor.
 //
 // Two layouts, one state tree:
-//   Desktop (>= lg) a fixed planner column (header, search, sakay guide) beside a full-height map.
+//   Desktop (>= lg) a fixed planner column (header, search, ride guide) beside a full-height map.
 //   Mobile          the map fills the screen and the planner rides in a draggable bottom sheet.
 //
 // Everything the commuter changes (origin, destination, priority, open step, live trip) lives here
@@ -99,7 +99,7 @@ type FeedbackKind = "fare-ok" | "fare-changed" | "route-inactive"
 interface FeedbackOption {
   id: FeedbackKind
   label: string
-  /** Plain Tagalog line under the label, so the choice needs no explaining. */
+  /** Plain line under the label, so the choice needs no explaining. */
   hint: string
   /** Confirmation copy for the toast. */
   toast: string
@@ -112,27 +112,27 @@ interface FeedbackOption {
 const FEEDBACK_OPTIONS: FeedbackOption[] = [
   {
     id: "fare-ok",
-    label: "Tama ang pamasahe",
-    hint: "Ganito rin ang binayaran ko kanina.",
-    toast: "Salamat! Nadagdagan ang kumpiyansa sa rutang ito.",
+    label: "The fare was right",
+    hint: "This is what I paid too.",
+    toast: "Thanks. This route is now a little more trusted.",
     tone: "ring-emerald-600/25 bg-emerald-500/[0.07] hover:bg-emerald-500/[0.12] text-emerald-800 dark:text-emerald-300",
     toastTone: "text-emerald-700 dark:text-emerald-400",
     Icon: CircleCheck,
   },
   {
     id: "fare-changed",
-    label: "Nagbago ang pamasahe",
-    hint: "Iba ang siningil sa akin ng drayber.",
-    toast: "Naitala ang pagbabago ng pamasahe. Salamat sa ulat!",
+    label: "The fare has changed",
+    hint: "The driver charged me something different.",
+    toast: "Fare change recorded. Thanks for the report.",
     tone: "ring-amber-600/25 bg-amber-500/[0.07] hover:bg-amber-500/[0.12] text-amber-800 dark:text-amber-300",
     toastTone: "text-amber-700 dark:text-amber-400",
     Icon: TriangleAlert,
   },
   {
     id: "route-inactive",
-    label: "Wala nang ganitong biyahe",
-    hint: "Hindi na bumibiyahe ang sasakyang ito.",
-    toast: "Naitala na wala nang biyahe rito. Titingnan namin ito.",
+    label: "This ride no longer runs",
+    hint: "This vehicle does not travel here any more.",
+    toast: "Recorded as no longer running. We will look into it.",
     tone: "ring-rose-600/25 bg-rose-500/[0.07] hover:bg-rose-500/[0.12] text-rose-800 dark:text-rose-300",
     toastTone: "text-rose-700 dark:text-rose-400",
     Icon: CircleX,
@@ -359,7 +359,7 @@ function App() {
 
   // --------------------------------------------------------------- Live trip tracking
   //
-  // "Simulan" turns on the browser's GPS watch. useTripProgress projects each fix onto the active
+  // "Start" turns on the browser's GPS watch. useTripProgress projects each fix onto the active
   // route so the map can redraw the ridden portion as done, and raises the three proximity moments
   // below. The 250 m warning is the one that buzzes the phone: it is the only alert that arrives
   // while there is still time to act on it.
@@ -374,8 +374,8 @@ function App() {
         showToast(
           {
             id: Date.now(),
-            message: `Malapit na ang babaan: ${event.placeName}`,
-            detail: `Mga ${event.minutes} min pa, ${formatMeters(event.distanceMeters)} ang layo. Maghanda nang bumaba.`,
+            message: `Your stop is coming up: ${event.placeName}`,
+            detail: `About ${event.minutes} min away, ${formatMeters(event.distanceMeters)} to go. Get ready to get off.`,
             tone: "text-amber-300",
             Icon: TriangleAlert,
             kind: "alert",
@@ -389,7 +389,7 @@ function App() {
         showToast(
           {
             id: Date.now(),
-            message: `Nasa ${event.placeName} ka na po.`,
+            message: `You are at ${event.placeName}.`,
             tone: "text-sky-700 dark:text-sky-400",
             Icon: MapPin,
             kind: "info",
@@ -407,8 +407,8 @@ function App() {
       showToast(
         {
           id: Date.now(),
-          message: `Dumating ka na sa ${event.placeName}!`,
-          detail: "Nasa ibaba ang buod ng biyahe mo.",
+          message: `You have arrived at ${event.placeName}.`,
+          detail: "Your trip summary is below.",
           tone: "text-emerald-700 dark:text-emerald-400",
           Icon: Flag,
           kind: "celebration",
@@ -451,8 +451,8 @@ function App() {
       scopeLabel={
         DYNAMIC_NETWORK_ENABLED
           ? networkLoading
-            ? "Kinukuha ang network"
-            : `Buong Cavite · ${placeNodes.length} hintuan`
+            ? "Loading the network"
+            : `All of Cavite · ${placeNodes.length} stops`
           : "Aguinaldo Highway spine"
       }
     />
@@ -460,16 +460,16 @@ function App() {
 
   const planner = networkFailed ? (
     <NetworkStateCard
-      title="Hindi makuha ang network ng ruta"
-      body="Hindi ma-abot ang database ng hintuan at ruta. Tingnan ang koneksyon mo, tapos subukan ulit."
+      title="Could not load the route network"
+      body="We could not reach the stop and route database. Check your connection, then try again."
       detail={dynamic.error?.message}
       onRetry={dynamic.reload}
     />
   ) : networkLoading ? (
     <NetworkStateCard
       loading
-      title="Hinahanda ang buong Cavite"
-      body="Kinukuha ang mga hintuan, ruta at daan mula sa database. Isang beses lang ito bawat pagbukas."
+      title="Getting all of Cavite ready"
+      body="Loading stops, routes and roads from the database. This happens once each time you open the app."
     />
   ) : (
     <>
@@ -503,7 +503,7 @@ function App() {
             <RouteEmptyState
               key={emptyReason}
               reason={emptyReason}
-              actionLabel={emptyReason === "no-route" ? "Baligtarin ang direksyon" : undefined}
+              actionLabel={emptyReason === "no-route" ? "Swap the direction" : undefined}
               onAction={emptyReason === "no-route" ? swap : undefined}
             />
           )
@@ -522,10 +522,10 @@ function App() {
 
       <p className="max-w-md px-2 pb-1 text-center text-xs leading-relaxed text-zinc-600 dark:text-zinc-300">
         {solved.failed
-          ? "May aberya sa paghahanap ng ruta. Subukan ang ibang tapat o baligtarin ang direksyon."
+          ? "Something went wrong while searching. Try another stop, or swap the direction."
           : DYNAMIC_NETWORK_ENABLED
-            ? "Galing sa OpenStreetMap ang mga ruta at hintuan dito. Tantiya lang ang pamasahe at oras, at hindi pa sinusukat sa kalsada ang alinman dito."
-            : "Tantiya mula sa corridor spec ang pamasahe, oras at signboard dito. Hindi pa ito sinusukat sa kalsada."}
+            ? "Routes and stops here come from OpenStreetMap. Fares and times are estimates, and none of it has been surveyed on the road yet."
+            : "Fares, times and signboards here are estimated from the corridor spec. None of it has been surveyed on the road yet."}
       </p>
     </>
   )
@@ -534,8 +534,8 @@ function App() {
     <AppErrorBoundary
       fallback={(retry) => (
         <PaneFallback
-          title="Hindi ma-load ang mapa"
-          body="Nagka-aberya ang mapa. Nandiyan pa rin ang buong sakay guide sa tabi."
+          title="The map could not load"
+          body="Something went wrong with the map. The full ride guide is still here beside it."
           onRetry={retry}
         />
       )}
@@ -565,7 +565,7 @@ function App() {
             )}
           >
             <LoaderCircle className={cn(ICON.xs, "animate-spin motion-reduce:animate-none")} aria-hidden />
-            Kinukuha ang mga hintuan
+            Loading stops
           </span>
         </div>
       )}
@@ -668,7 +668,7 @@ function AppHeader({ isDark, onToggleDark, onReport, canReport, reported, floati
         type="button"
         onClick={onReport}
         disabled={!canReport}
-        aria-label={reported ? "Mag-ulat ulit tungkol sa rutang ito" : "Mag-ulat ng update sa rutang ito"}
+        aria-label={reported ? "Report on this route again" : "Report an update on this route"}
         className={cn(
           // min-w-11 matters below `sm`, where the label hides and the button would otherwise
           // shrink to its icon plus padding, landing at 40px against a 44px minimum.
@@ -683,13 +683,13 @@ function AppHeader({ isDark, onToggleDark, onReport, canReport, reported, floati
         )}
       >
         {reported ? <CircleCheck className={ICON.sm} aria-hidden /> : <Megaphone className={ICON.sm} aria-hidden />}
-        <span className="hidden sm:inline">{reported ? "Na-verify" : "Mag-ulat"}</span>
+        <span className="hidden sm:inline">{reported ? "Reported" : "Report"}</span>
       </button>
 
       <button
         type="button"
         onClick={onToggleDark}
-        aria-label={isDark ? "Lumipat sa light mode" : "Lumipat sa dark mode"}
+        aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
         aria-pressed={isDark}
         className={cn(
           "flex size-11 shrink-0 items-center justify-center",
@@ -776,7 +776,7 @@ function MobileSheet({ expanded, onExpandedChange, reduceMotion, children }: Mob
         onClick={() => onExpandedChange(!expanded)}
         onPointerDown={(event) => dragControls.start(event)}
         aria-expanded={expanded}
-        aria-label={expanded ? "Isara ang trip planner" : "Buksan ang trip planner"}
+        aria-label={expanded ? "Collapse the trip planner" : "Open the trip planner"}
         className={cn("flex h-11 w-full shrink-0 touch-none items-center justify-center gap-2 active:cursor-grabbing", FOCUS)}
       >
         <span className="h-1.5 w-10 rounded-full bg-zinc-400/50 dark:bg-zinc-600" aria-hidden />
@@ -827,9 +827,9 @@ function FeedbackDialog({
         className={cn("gap-3 bg-zinc-50 p-5 ring-zinc-900/[0.07] sm:max-w-md dark:bg-zinc-900 dark:ring-white/10", RADIUS.panel)}
       >
         <DialogHeader>
-          <DialogTitle className="text-base font-bold tracking-tight">I-verify ang ruta</DialogTitle>
+          <DialogTitle className="text-base font-bold tracking-tight">Check this route</DialogTitle>
           <DialogDescription className="text-sm leading-relaxed text-zinc-600 dark:text-zinc-300">
-            Isang tap lang. Ang sagot mo ang nagpapatino ng pamasahe para sa susunod na sasakay.
+            One tap. Your answer is what keeps the fares honest for the next commuter.
           </DialogDescription>
         </DialogHeader>
 
@@ -871,7 +871,7 @@ function FeedbackDialog({
         </div>
 
         <p className="text-center text-xs leading-relaxed text-zinc-600 dark:text-zinc-300">
-          Sa session mo lang naitatabi ang ulat sa ngayon. Wala pang server na pinapadalhan.
+          Reports are kept only in this session for now. There is no server receiving them yet.
         </p>
 
         <button
@@ -886,7 +886,7 @@ function FeedbackDialog({
             FOCUS
           )}
         >
-          Hindi muna
+          Not now
         </button>
       </DialogContent>
     </Dialog>
@@ -898,9 +898,9 @@ function FeedbackDialog({
 // ---------------------------------------------------------------------------
 
 const GEO_STATUS_COPY: Partial<Record<GeolocationStatus, string>> = {
-  denied: "Naka-block ang location access. Payagan ito sa settings ng browser para gumana ang live tracking.",
-  unsupported: "Hindi suportado ng browser na ito ang live na GPS tracking.",
-  error: "May problema sa pagkuha ng lokasyon. Subukan ulit.",
+  denied: "Location access is blocked. Allow it in your browser settings to use live tracking.",
+  unsupported: "This browser does not support live GPS tracking.",
+  error: "Something went wrong getting your location. Try again.",
 }
 
 interface TripTrackingBarProps {
@@ -912,7 +912,7 @@ interface TripTrackingBarProps {
 }
 
 /**
- * A persistent strip under the sakay guide: start and stop live GPS tracking, see how far to the
+ * A persistent strip under the ride guide: start and stop live GPS tracking, see how far to the
  * next drop-off, and, the thing a commuter actually scans for on a moving road, which signboard to
  * be watching for right now. Separate from RouteResultCard because tracking is a device concern
  * (permissions, a live watch) that outlives any one step being expanded or collapsed.
@@ -933,7 +933,7 @@ function TripTrackingBar({ route, geoStatus, progress, onStart, onStop }: TripTr
 
           {statusCopy === undefined && !isActive && (
             <p className="text-xs leading-relaxed font-medium text-zinc-600 dark:text-zinc-300">
-              Buksan ang GPS para makita kung nasaan ka na sa ruta, at para may abiso bago ang babaan mo.
+              Turn on GPS to see where you are along the route, and to get a warning before your stop.
             </p>
           )}
 
@@ -942,19 +942,19 @@ function TripTrackingBar({ route, geoStatus, progress, onStart, onStop }: TripTr
           {statusCopy === undefined && isWaitingForFix && (
             <p className="flex items-center gap-2 text-xs font-medium text-zinc-600 dark:text-zinc-300">
               <LoaderCircle className={cn(ICON.xs, "animate-spin motion-reduce:animate-none")} aria-hidden />
-              Hinahanap ang lokasyon mo
+              Finding your location
             </p>
           )}
 
           {statusCopy === undefined && isActive && progress !== null && currentStep !== null && (
             <>
               <p className="truncate text-sm font-bold text-zinc-900 dark:text-zinc-50">
-                {progress.onRoute ? `Patungo sa ${currentStep.to}` : "Wala ka sa ruta ngayon"}
+                {progress.onRoute ? `Heading to ${currentStep.to}` : "You are off the route"}
               </p>
               <p className="text-xs tabular-nums text-zinc-600 dark:text-zinc-300">
                 {progress.onRoute
-                  ? `${formatMeters(progress.distanceToStepEndMeters)} na lang sa susunod na baba`
-                  : "Subukang bumalik sa daan ng ruta"}
+                  ? `${formatMeters(progress.distanceToStepEndMeters)} to your next stop`
+                  : "Try to get back onto the route"}
               </p>
             </>
           )}
@@ -975,7 +975,7 @@ function TripTrackingBar({ route, geoStatus, progress, onStart, onStop }: TripTr
           )}
         >
           {isActive ? <Square className={ICON.sm} aria-hidden /> : <Navigation className={ICON.sm} aria-hidden />}
-          {isActive ? "Ihinto" : "Simulan"}
+          {isActive ? "Stop" : "Start"}
         </button>
       </div>
 
@@ -987,7 +987,7 @@ function TripTrackingBar({ route, geoStatus, progress, onStart, onStop }: TripTr
             return (
               <>
                 <meta.Icon className={cn(ICON.sm, "shrink-0")} style={{ color: meta.hex }} aria-hidden />
-                <span className="text-xs font-semibold text-zinc-600 dark:text-zinc-300">Hanapin ito:</span>
+                <span className="text-xs font-semibold text-zinc-600 dark:text-zinc-300">Look for:</span>
                 <PlacardTag text={currentStep.placardText} size="sm" />
               </>
             )
@@ -1075,7 +1075,7 @@ function ToastBanner({
             <button
               type="button"
               onClick={onDismiss}
-              aria-label="Isara ang abiso"
+              aria-label="Dismiss this notice"
               className={cn(
                 "-my-1 -mr-1.5 flex size-11 shrink-0 items-center justify-center",
                 RADIUS.pill,
@@ -1146,7 +1146,7 @@ function NetworkStateCard({
           )}
         >
           <RefreshCw className={ICON.sm} aria-hidden />
-          Subukan ulit
+          Try again
         </button>
       )}
     </div>
@@ -1172,7 +1172,7 @@ function PaneFallback({ title, body, onRetry }: { title: string; body: string; o
           )}
         >
           <RefreshCw className={ICON.sm} aria-hidden />
-          Subukan ulit
+          Try again
         </button>
       </div>
     </div>

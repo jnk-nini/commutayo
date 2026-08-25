@@ -51,6 +51,9 @@ const LOCAL_MATCHES_BEFORE_GEOCODING = 4
 /** Shortest query worth sending. Below this every result would be noise. */
 const MIN_GEOCODE_QUERY = 3
 
+/** Stable identity for "no landmarks", so a memo downstream can rest on it. */
+const EMPTY_LANDMARKS: SnappedPlace[] = []
+
 /** One row of the dropdown. Both kinds resolve to a routable node id when chosen. */
 type Option =
   | { kind: "stop"; node: TransitNode; matchedAlias: string | null }
@@ -87,8 +90,14 @@ export function PlaceCombobox({
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState("")
   const [activeIndex, setActiveIndex] = useState(0)
-  const [landmarks, setLandmarks] = useState<SnappedPlace[]>([])
-  const [searchingLandmarks, setSearchingLandmarks] = useState(false)
+  // Stamped with the query it answers, so a result that arrives after the commuter has typed on is
+  // recognisably stale and simply never rendered. Keeping the query alongside the results is what
+  // lets both "which landmarks apply now" and "are we still waiting" be derived during render
+  // instead of resynchronised by an effect.
+  const [landmarkResult, setLandmarkResult] = useState<{ query: string; results: SnappedPlace[] }>({
+    query: "",
+    results: [],
+  })
 
   const rootRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -110,25 +119,29 @@ export function PlaceCombobox({
   const wantsLandmarks =
     open && trimmedQuery.length >= MIN_GEOCODE_QUERY && ranked.length < LOCAL_MATCHES_BEFORE_GEOCODING
 
+  // Landmarks apply only to the query they were fetched for. Anything else on screen is either a
+  // stale answer or one still in flight, and both render as "still looking".
+  // Memoised so the empty case is the same array every render: `options` below is a memo keyed on
+  // this, and a fresh [] each time would rebuild the whole list on every keystroke.
+  const landmarks = useMemo(
+    () => (wantsLandmarks && landmarkResult.query === trimmedQuery ? landmarkResult.results : EMPTY_LANDMARKS),
+    [wantsLandmarks, landmarkResult, trimmedQuery]
+  )
+  const searchingLandmarks = wantsLandmarks && landmarkResult.query !== trimmedQuery
+
   // Ask the geocoder only once typing has paused, and abandon the previous ask when it resumes.
   // The abort is what keeps this to one request per pause rather than one per keystroke.
   useEffect(() => {
-    if (!wantsLandmarks) {
-      setLandmarks([])
-      setSearchingLandmarks(false)
-      return
-    }
+    if (!wantsLandmarks) return
 
     const controller = new AbortController()
     let cancelled = false
-    setSearchingLandmarks(true)
 
     const timer = window.setTimeout(() => {
       const listed = new Set(pool.map((node) => node.id))
       void findLandmarks(trimmedQuery, pool, listed, controller.signal).then((found) => {
         if (cancelled) return
-        setLandmarks(found)
-        setSearchingLandmarks(false)
+        setLandmarkResult({ query: trimmedQuery, results: found })
       })
     }, SEARCH_DEBOUNCE_MS)
 
