@@ -23,6 +23,7 @@
 import { describe, expect, it } from "vitest"
 
 import { buildNetworkFromDatabase, derivePlacardText, selectableNodes } from "@/utils/dynamicRoutingEngine"
+import { buildRouteGeometry, projectOntoRoute, type LatLng } from "@/utils/geo"
 import { findRoute } from "@/utils/routingEngine"
 import type { TransitNetworkTables } from "@/utils/transitRepository"
 import type { Route, RouteStop, Stop } from "@/types/transit"
@@ -186,29 +187,70 @@ describe("Bella Vista to LPU Cavite", () => {
     expect(result!.steps[0].placardText).toContain("TRECE MARTIRES")
   })
 
-  it("builds no edge that runs against a route's own sequence", () => {
-    const positions = new Map<string, Map<string, number>>()
-    for (const routeStop of ROUTE_STOPS) {
-      const byStop = positions.get(routeStop.route_id) ?? new Map<string, number>()
-      byStop.set(routeStop.stop_id, routeStop.sequence)
-      positions.set(routeStop.route_id, byStop)
+  it("rides straight through without changing vehicles", () => {
+    // The whole point of the trip. The Trece-bound jeepney from Bella Vista drives past LPU
+    // Cavite's door; the commuter stays seated, and so should the plan.
+    for (const priority of ["cheapest", "fastest", "easiest"] as const) {
+      const result = findRoute(NETWORK, nodeIdNamed("Bella Vista"), nodeIdNamed("LPU Cavite"), priority)
+      expect(result, priority).not.toBeNull()
+      expect(result!.transferCount, `${priority} should be a single-seat ride`).toBe(0)
+      expect(result!.steps.filter((step) => step.mode !== "walk"), priority).toHaveLength(1)
+      // Monterey Junction is still on the way -- it is just passed, not alighted at.
+      expect(result!.steps[0].viaStops, priority).toContain("Monterey Junction")
     }
-    // A merged node answers to any of the ids it absorbed, so an edge's endpoint is "at" the
-    // earliest position any of those kerbs holds on this route.
-    const positionOf = (routeId: string, nodeName: string): number => {
-      const byStop = positions.get(routeId)!
-      const candidates = STOPS.filter((s) => s.name === nodeName && byStop.has(s.id)).map((s) => byStop.get(s.id)!)
-      expect(candidates.length, `${nodeName} is not on ${routeId}`).toBeGreaterThan(0)
-      return Math.min(...candidates)
-    }
+  })
 
+  it("serves a stop the route drives past but never lists", () => {
+    // LPU Cavite is nowhere in molino-trece's own sequence. It qualifies because it sits 8m from
+    // the line between Monterey Junction and Manggahan Junction, which the relation does list.
+    const listed = ROUTE_STOPS.filter((routeStop) => routeStop.route_id === "molino-trece").map(
+      (routeStop) => routeStop.stop_id
+    )
+    expect(listed).not.toContain("lpu-east")
+    expect(listed).not.toContain("lpu-west")
+
+    const lpuId = nodeIdNamed("LPU Cavite")
+    const served = NETWORK.edges.filter((edge) => edge.serviceId === "molino-trece" && edge.toNodeId === lpuId)
+    expect(served).toHaveLength(1)
+  })
+
+  it("inserts nothing on a stretch too long to model as a straight line", () => {
+    // Alfonso Proper is 17km south of Manggahan Junction, so dasma-alfonso's last gap is far past
+    // PASSED_STOP_MAX_CHORD_METERS. Whatever happens to lie near that chord stays out.
     const nameById = new Map(NETWORK.nodes.map((node) => [node.id, node.name]))
+    const longGapEdges = NETWORK.edges.filter(
+      (edge) => edge.serviceId === "dasma-alfonso" && nameById.get(edge.fromNodeId) === "Manggahan Junction"
+    )
+    expect(longGapEdges).toHaveLength(1)
+    expect(nameById.get(longGapEdges[0].toNodeId)).toBe("Alfonso Proper")
+  })
+
+  it("builds no edge that runs against the direction its route travels", () => {
+    // Checked geometrically rather than against `sequence`, because a route now also serves stops
+    // its relation never listed and those have no sequence number to compare. Projecting both ends
+    // of every edge onto the line through the route's listed stops is the independent test: an
+    // edge that runs backward projects to a smaller distance than it started from, whether or not
+    // either of its endpoints was in the original list.
+    const stopById = new Map(STOPS.map((stopRow) => [stopRow.id, stopRow]))
+    const nameById = new Map(NETWORK.nodes.map((node) => [node.id, node.name]))
+
+    const listedPathOf = (routeId: string): LatLng[] =>
+      ROUTE_STOPS.filter((routeStop) => routeStop.route_id === routeId)
+        .sort((a, b) => a.sequence - b.sequence)
+        .map((routeStop) => stopById.get(routeStop.stop_id)!)
+        .map((stopRow) => [stopRow.lat, stopRow.lon] as LatLng)
+
+    const geometryByRoute = new Map(ROUTES.map((r) => [r.id, buildRouteGeometry([{ path: listedPathOf(r.id) }])]))
+
     for (const edge of NETWORK.edges) {
-      const fromName = nameById.get(edge.fromNodeId)!
-      const toName = nameById.get(edge.toNodeId)!
-      const from = positionOf(edge.serviceId, fromName)
-      const to = positionOf(edge.serviceId, toName)
-      expect(to, `${edge.serviceId}: ${fromName} to ${toName} runs backward`).toBeGreaterThan(from)
+      const geometry = geometryByRoute.get(edge.serviceId)!
+      const nodeById = new Map(NETWORK.nodes.map((node) => [node.id, node]))
+      const at = (nodeId: string): number => {
+        const node = nodeById.get(nodeId)!
+        return projectOntoRoute(geometry, [node.lat, node.lng])!.distanceTraveledMeters
+      }
+      const label = `${edge.serviceId}: ${nameById.get(edge.fromNodeId)} to ${nameById.get(edge.toNodeId)}`
+      expect(at(edge.toNodeId), `${label} runs backward`).toBeGreaterThan(at(edge.fromNodeId))
     }
   })
 })

@@ -1,0 +1,16 @@
+built in 1544ms
+nodes=703 selectable=668 edges=3035
+"Bella Vista" -> 1 selectable node(s)
+"LPU Cavite" -> 1 selectable node(s)
+
+[fastest] P17 | 28 min | transfers=0 | confidence=60
+  1. jeepney/jeepney_traditional sign="WALTERMART TRECE MARTIRES"
+     board Bella Vista -> alight LPU Cavite  (P17, 28min, passes 14 stops)
+
+[cheapest] P17 | 28 min | transfers=0 | confidence=60
+  1. jeepney/jeepney_traditional sign="WALTERMART TRECE MARTIRES"
+     board Bella Vista -> alight LPU Cavite  (P17, 28min, passes 14 stops)
+
+[easiest] P17 | 28 min | transfers=0 | confidence=60
+  1. jeepney/jeepney_traditional sign="WALTERMART TRECE MARTIRES"
+     board Bella Vista -> alight LPU Cavite  (P17, 28min, passes 14 stops)

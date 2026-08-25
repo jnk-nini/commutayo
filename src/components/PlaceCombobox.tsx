@@ -6,27 +6,55 @@
 // `aliases` list from the routing engine, so the vocabulary lives with the network data and cannot
 // drift away from it.
 //
+// The list has two sections, and the second one only appears when the first cannot answer:
+//   - STOPS are the names in our own table, ranked by `placeSearch.ts` (exact, then prefix, then
+//     substring, then typo-tolerant).
+//   - LANDMARKS come from the OpenStreetMap geocoder, and each one is snapped to the nearest stop
+//     we can actually route from. This is the answer to "the search bar is useless if I don't know
+//     the exact stop name": nobody calls it "Monterey Junction", they call it "the mall", and a
+//     picker that only knows stop names cannot help with that.
+// Landmarks are asked for only after the local tiers come up short and typing has paused, both to
+// keep the fast path instant and to stay inside Nominatim's usage policy. See geocoder.ts.
+//
 // Accessibility follows the ARIA combobox pattern: the input owns the expanded state and points at
 // the active option through aria-activedescendant, the list is a real listbox, and every option is
 // a 44px target. The visible label sits above the field. Nothing here uses a placeholder as a label.
 
-import { useCallback, useId, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion"
-import { Check, ChevronsUpDown, X, type LucideIcon } from "lucide-react"
+import { Check, ChevronsUpDown, LoaderCircle, MapPinned, X, type LucideIcon } from "lucide-react"
 
 import { cn } from "@/lib/utils"
+import { SEARCH_DEBOUNCE_MS, findLandmarks, type SnappedPlace } from "@/utils/geocoder"
 import { rankPlaces } from "@/utils/placeSearch"
-import { FOCUS, ICON, RADIUS } from "@/utils/presentation"
+import { FOCUS, ICON, RADIUS, formatMeters } from "@/utils/presentation"
 import type { TransitNode } from "@/utils/routingEngine"
 
 /**
  * How many options the list will actually render. `rankPlaces` scores and returns every stop it
- * matches, which on the Cavite-wide network is ~800 of them for an empty query -- building that
+ * matches, which on the Cavite-wide network is ~670 of them for an empty query -- building that
  * many option buttons every time the field is focused is a visible stall on a phone, and nobody
  * scrolls past the first screenful anyway. Ranking is untouched: this caps the DOM, not the search,
  * so the best matches are still the ones that survive the cut.
  */
 const MAX_VISIBLE_OPTIONS = 50
+
+/**
+ * Local matches below which the geocoder is worth asking.
+ *
+ * Not zero: a query that matches one stop weakly is exactly the case where the commuter meant a
+ * landmark near it rather than the stop itself, and a query that already returns a screenful of
+ * stops does not need help.
+ */
+const LOCAL_MATCHES_BEFORE_GEOCODING = 4
+
+/** Shortest query worth sending. Below this every result would be noise. */
+const MIN_GEOCODE_QUERY = 3
+
+/** One row of the dropdown. Both kinds resolve to a routable node id when chosen. */
+type Option =
+  | { kind: "stop"; node: TransitNode; matchedAlias: string | null }
+  | { kind: "landmark"; node: TransitNode; label: string; context: string; meters: number }
 
 export interface PlaceComboboxProps {
   id: string
@@ -59,21 +87,76 @@ export function PlaceCombobox({
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState("")
   const [activeIndex, setActiveIndex] = useState(0)
+  const [landmarks, setLandmarks] = useState<SnappedPlace[]>([])
+  const [searchingLandmarks, setSearchingLandmarks] = useState(false)
 
   const rootRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
   const selected = useMemo(() => nodes.find((node) => node.id === value) ?? null, [nodes, value])
 
-  const ranked = useMemo(() => {
-    const pool = excludeId === null ? nodes : nodes.filter((node) => node.id !== excludeId)
-    return rankPlaces(query, pool)
-  }, [nodes, excludeId, query])
+  const pool = useMemo(
+    () => (excludeId === null ? nodes : nodes.filter((node) => node.id !== excludeId)),
+    [nodes, excludeId]
+  )
+  const ranked = useMemo(() => rankPlaces(query, pool), [pool, query])
 
   // Everything below navigates and announces the *rendered* list, so keyboard arrows, Enter and
   // aria-activedescendant can never point at an option that isn't on screen.
-  const matches = useMemo(() => ranked.slice(0, MAX_VISIBLE_OPTIONS), [ranked])
-  const hiddenCount = ranked.length - matches.length
+  const stopMatches = useMemo(() => ranked.slice(0, MAX_VISIBLE_OPTIONS), [ranked])
+  const hiddenCount = ranked.length - stopMatches.length
+
+  const trimmedQuery = query.trim()
+  const wantsLandmarks =
+    open && trimmedQuery.length >= MIN_GEOCODE_QUERY && ranked.length < LOCAL_MATCHES_BEFORE_GEOCODING
+
+  // Ask the geocoder only once typing has paused, and abandon the previous ask when it resumes.
+  // The abort is what keeps this to one request per pause rather than one per keystroke.
+  useEffect(() => {
+    if (!wantsLandmarks) {
+      setLandmarks([])
+      setSearchingLandmarks(false)
+      return
+    }
+
+    const controller = new AbortController()
+    let cancelled = false
+    setSearchingLandmarks(true)
+
+    const timer = window.setTimeout(() => {
+      const listed = new Set(pool.map((node) => node.id))
+      void findLandmarks(trimmedQuery, pool, listed, controller.signal).then((found) => {
+        if (cancelled) return
+        setLandmarks(found)
+        setSearchingLandmarks(false)
+      })
+    }, SEARCH_DEBOUNCE_MS)
+
+    return () => {
+      cancelled = true
+      controller.abort()
+      window.clearTimeout(timer)
+    }
+  }, [wantsLandmarks, trimmedQuery, pool])
+
+  const options = useMemo<Option[]>(() => {
+    const stops: Option[] = stopMatches.map((match) => ({
+      kind: "stop",
+      node: match.node,
+      matchedAlias: match.matchedAlias,
+    }))
+    const found: Option[] = landmarks.map((hit) => ({
+      kind: "landmark",
+      node: hit.node,
+      label: hit.place.label,
+      context: hit.place.context,
+      meters: hit.meters,
+    }))
+    return [...stops, ...found]
+  }, [stopMatches, landmarks])
+
+  // The index the landmark section starts at, so its heading renders in the right place.
+  const firstLandmarkIndex = stopMatches.length
 
   // While closed the field shows the chosen stop; while open it shows what is being typed. Without
   // this the input would either wipe the selection on focus or trap the old name in the box.
@@ -98,8 +181,8 @@ export function PlaceCombobox({
       }
       const delta = event.key === "ArrowDown" ? 1 : -1
       setActiveIndex((current) => {
-        if (matches.length === 0) return 0
-        return (current + delta + matches.length) % matches.length
+        if (options.length === 0) return 0
+        return (current + delta + options.length) % options.length
       })
       return
     }
@@ -107,8 +190,8 @@ export function PlaceCombobox({
     if (event.key === "Enter") {
       if (!open) return
       event.preventDefault()
-      const match = matches[activeIndex]
-      if (match !== undefined) commit(match.node.id)
+      const option = options[activeIndex]
+      if (option !== undefined) commit(option.node.id)
       return
     }
 
@@ -161,7 +244,9 @@ export function PlaceCombobox({
           aria-controls={listId}
           aria-autocomplete="list"
           aria-describedby={hintId}
-          aria-activedescendant={open && matches[activeIndex] !== undefined ? `${id}-opt-${matches[activeIndex].node.id}` : undefined}
+          aria-activedescendant={
+            open && options[activeIndex] !== undefined ? `${id}-opt-${activeIndex}` : undefined
+          }
           autoComplete="off"
           value={displayValue}
           placeholder={placeholder}
@@ -179,6 +264,13 @@ export function PlaceCombobox({
           )}
         />
 
+        {searchingLandmarks && (
+          <LoaderCircle
+            className={cn(ICON.sm, "shrink-0 animate-spin text-zinc-400 motion-reduce:animate-none")}
+            aria-hidden
+          />
+        )}
+
         {selected !== null && !open ? (
           <button
             type="button"
@@ -187,7 +279,7 @@ export function PlaceCombobox({
               setOpen(true)
               inputRef.current?.focus()
             }}
-            aria-label={`Palitan ang ${label.toLowerCase()}, ngayon ay ${selected.shortName}`}
+            aria-label={`Change ${label.toLowerCase()}, currently ${selected.shortName}`}
             className={cn(
               "flex size-11 shrink-0 items-center justify-center text-zinc-400",
               "transition-colors duration-150 hover:text-zinc-700 dark:hover:text-zinc-200",
@@ -198,12 +290,14 @@ export function PlaceCombobox({
             <X className={ICON.sm} aria-hidden />
           </button>
         ) : (
-          <ChevronsUpDown className={cn(ICON.sm, "shrink-0 text-zinc-400 dark:text-zinc-500")} aria-hidden />
+          !searchingLandmarks && (
+            <ChevronsUpDown className={cn(ICON.sm, "shrink-0 text-zinc-400 dark:text-zinc-500")} aria-hidden />
+          )
         )}
       </div>
 
       <p id={hintId} className="sr-only">
-        Mag-type ng pangalan o palayaw ng lugar, tapos pumili gamit ang arrow keys at Enter.
+        Type a stop name, a nickname, or a nearby landmark, then choose with the arrow keys and Enter.
       </p>
 
       <AnimatePresence>
@@ -223,38 +317,60 @@ export function PlaceCombobox({
             )}
           >
             <ul id={listId} role="listbox" aria-label={label} className="max-h-64 overflow-y-auto overscroll-contain py-1">
-              {matches.length === 0 && (
+              {options.length === 0 && (
                 <li className="px-3 py-3 text-sm text-zinc-600 dark:text-zinc-300">
-                  Walang tugmang lugar. Subukan ang ibang palayaw.
+                  {searchingLandmarks
+                    ? "Looking for nearby places..."
+                    : "No match. Try another spelling, or the name of a landmark nearby."}
                 </li>
               )}
 
-              {matches.map((match, index) => {
+              {options.map((option, index) => {
                 const isActive = index === activeIndex
-                const isSelected = match.node.id === value
+                const isSelected = option.node.id === value
                 // OSM-imported stops carry no city, so the subtitle is assembled from whatever is
                 // actually known instead of rendering an empty line under every name.
-                const subtitle = [match.node.city, match.matchedAlias === null ? "" : `(${match.matchedAlias})`]
-                  .filter((part) => part.length > 0)
-                  .join(" ")
+                const subtitle =
+                  option.kind === "stop"
+                    ? [option.node.city, option.matchedAlias === null ? "" : `(${option.matchedAlias})`]
+                        .filter((part) => part.length > 0)
+                        .join(" ")
+                    : [option.context, `nearest stop ${option.node.shortName}, ${formatMeters(option.meters)} away`]
+                        .filter((part) => part.length > 0)
+                        .join(" · ")
+
                 return (
-                  <li key={match.node.id}>
+                  <li key={`${option.kind}-${option.node.id}-${index}`}>
+                    {/* The heading sits inside the first landmark's row rather than in its own
+                        <li>, so the listbox contains only options and the index the keyboard is
+                        tracking still matches what is on screen. */}
+                    {option.kind === "landmark" && index === firstLandmarkIndex && (
+                      <p className="px-3 pt-2 pb-1 text-xs font-semibold text-zinc-500 dark:text-zinc-400" aria-hidden>
+                        Nearby places
+                      </p>
+                    )}
                     <button
-                      id={`${id}-opt-${match.node.id}`}
+                      id={`${id}-opt-${index}`}
                       type="button"
                       role="option"
                       aria-selected={isSelected}
                       onMouseEnter={() => setActiveIndex(index)}
-                      onClick={() => commit(match.node.id)}
+                      onClick={() => commit(option.node.id)}
                       className={cn(
                         "flex min-h-11 w-full items-center gap-3 px-3 py-2 text-left",
                         "transition-colors duration-150",
                         isActive ? "bg-emerald-500/10 dark:bg-emerald-400/10" : "bg-transparent"
                       )}
                     >
+                      {option.kind === "landmark" && (
+                        <MapPinned
+                          className={cn(ICON.sm, "shrink-0 text-zinc-400 dark:text-zinc-500")}
+                          aria-hidden
+                        />
+                      )}
                       <span className="min-w-0 flex-1">
                         <span className="block truncate text-sm font-semibold text-zinc-900 dark:text-zinc-50">
-                          {match.node.shortName}
+                          {option.kind === "stop" ? option.node.shortName : option.label}
                         </span>
                         {subtitle.length > 0 && (
                           <span className="block truncate text-xs text-zinc-600 dark:text-zinc-300">{subtitle}</span>
@@ -270,11 +386,8 @@ export function PlaceCombobox({
 
               {/* Says the list was cut rather than letting it look like the whole network. */}
               {hiddenCount > 0 && (
-                <li
-                  aria-hidden
-                  className="px-3 py-2 text-xs text-zinc-500 dark:text-zinc-400"
-                >
-                  +{hiddenCount} pang lugar. Mag-type pa para umikli ang listahan.
+                <li aria-hidden className="px-3 py-2 text-xs text-zinc-500 dark:text-zinc-400">
+                  +{hiddenCount} more stops. Keep typing to narrow the list.
                 </li>
               )}
             </ul>

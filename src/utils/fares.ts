@@ -3,9 +3,9 @@
 //   1. The LTFRB-style fare matrix: base fare per vehicle type plus a per-kilometer rate after
 //      the base distance. The routing engine calls this so no edge in the graph carries a
 //      hand-typed fare that can drift from the rules.
-//   2. Discounts and cash rounding. Students, senior citizens and PWDs get 20% off (RA 9994,
-//      RA 10754, and the LTFRB student fare rules), and every amount is rounded to money a
-//      conductor can actually make change for.
+//   2. Discounts and cash rounding. Students, senior citizens and PWDs all get the same 20% off
+//      (RA 9994, RA 10754, and the LTFRB student fare rules), so they share one fare class here,
+//      and every amount is rounded to money a conductor can actually make change for.
 //
 // Rounding is the reason this file exists at all: a raw formula produces ₱15.25, and nobody has
 // ever handed a jeepney driver 25 centavos. Real matrices are printed in whole pesos.
@@ -101,22 +101,38 @@ export function marginalFare(vehicleClass: VehicleClass, distanceKm: number): nu
 // Discounts
 // ---------------------------------------------------------------------------
 
-export type FareClass = "regular" | "student" | "senior_pwd"
+/**
+ * Who is paying. Two values, not four.
+ *
+ * Students, senior citizens and PWDs are separate entitlements in law, with separate ID cards and
+ * separate statutes behind them (the LTFRB student fare rules, RA 9994, RA 10754) -- but all three
+ * are the same 20% off the same fare, so to this app they are one number. Splitting them into
+ * separate toggles asked the commuter to classify themselves for no change in the answer, and
+ * spent a third of the fare card's width doing it.
+ *
+ * If the rates ever diverge, this is where they split back apart, and `fareClassOption` is the
+ * only thing that has to learn about it.
+ */
+export type FareClass = "regular" | "discounted"
 
 export interface FareClassOption {
   id: FareClass
-  /** Short label for the toggle chip. */
+  /** Short label for the toggle. */
   label: string
-  /** Spoken-Tagalog description, for the fare note under the total. */
+  /** Description for the fare note under the total. */
   description: string
   /** Fraction taken off the regular fare, 0-1. */
   discount: number
 }
 
 export const FARE_CLASSES: FareClassOption[] = [
-  { id: "regular", label: "Regular", description: "Regular na pamasahe", discount: 0 },
-  { id: "student", label: "Estudyante", description: "20% student discount", discount: 0.2 },
-  { id: "senior_pwd", label: "Senior / PWD", description: "20% senior at PWD discount", discount: 0.2 },
+  { id: "regular", label: "Regular", description: "regular fare", discount: 0 },
+  {
+    id: "discounted",
+    label: "Student / Senior / PWD",
+    description: "20% student, senior citizen or PWD discount",
+    discount: 0.2,
+  },
 ]
 
 const FARE_CLASS_BY_ID = new Map(FARE_CLASSES.map((option) => [option.id, option]))

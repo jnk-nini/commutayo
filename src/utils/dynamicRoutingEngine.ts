@@ -509,6 +509,133 @@ function mergeSplitStops(stops: Stop[]): MergedStops {
   return { stops: merged, canonicalIdOf }
 }
 
+// --- Stops a route drives past but never lists ------------------------------------------------
+//
+// OSM route relations record the *way* a vehicle takes far more reliably than the stops along it.
+// A relation is complete when the roads are chained end to end; adding every boarding point on
+// those roads is separate, optional, and frequently skipped.
+//
+// That gap is what produced the reported Bella Vista to LPU Cavite trip. The Trece-bound jeepney
+// from Bella Vista drives the length of Governor's Drive and passes LPU Cavite's door -- 8.4m from
+// the straight line between the two stops the relation *does* list either side of it, Monterey
+// Junction and an unnamed node 230m further west. But because LPU is not in that relation's stop
+// list, the graph had no edge reaching it on that jeepney, and the only way to arrive was to
+// change onto a Route 31 or Route 58 bus at Monterey Junction. The router was not being greedy;
+// it was answering the only question the data let it answer. A commuter looking at the same road
+// just stays seated.
+//
+// So a stop that sits inside a narrow corridor around the segment between two consecutive listed
+// stops, and between them rather than beyond either end, is treated as served by that route. This
+// is an inference, and it is a conservative one:
+//   - the corridor is 40m, about one carriageway plus its shoulder, so a stop on a genuinely
+//     different road cannot qualify;
+//   - only gaps shorter than 2.5km are filled, because the straight line between two stops far
+//     apart stops resembling the road that joins them;
+//   - a stop the route already lists anywhere is never inserted, so this can only ever add a
+//     stop the relation is silent about, and can never reorder one it names.
+//
+// On the live Cavite import this adds roughly 1,100 route/stop pairs across 118 of the 342 routes,
+// which is the scale you would expect if incomplete stop lists were the norm rather than the
+// exception. Nothing is written back to the database: this is a routing-time inference, and the
+// tables stay a faithful record of what OSM actually says.
+
+/** Half-width of the corridor around a segment. One carriageway plus a shoulder, not a whole road. */
+export const PASSED_STOP_CORRIDOR_METERS = 40
+
+/**
+ * Longest gap between two listed stops that will be filled in.
+ *
+ * The test is against a straight line, and a straight line is only a good model of a road over a
+ * short run. Past a couple of kilometres it starts cutting corners the vehicle actually drives
+ * around, and a stop near the chord may be nowhere near the route.
+ */
+export const PASSED_STOP_MAX_CHORD_METERS = 2500
+
+/** Keeps a projection clear of the segment's own endpoints, which are already in the sequence. */
+const PASSED_STOP_END_MARGIN_METERS = 25
+
+/** Coarse spatial buckets so a chord only tests the stops near it, not all ~800 of them. */
+const GRID_CELL_DEGREES = 0.01
+
+type StopGrid = Map<string, Stop[]>
+
+function gridKey(lat: number, lon: number): string {
+  return `${Math.floor(lat / GRID_CELL_DEGREES)}:${Math.floor(lon / GRID_CELL_DEGREES)}`
+}
+
+function buildStopGrid(stops: Stop[]): StopGrid {
+  const grid: StopGrid = new Map()
+  for (const stop of stops) {
+    const key = gridKey(stop.lat, stop.lon)
+    const bucket = grid.get(key)
+    if (bucket === undefined) grid.set(key, [stop])
+    else bucket.push(stop)
+  }
+  return grid
+}
+
+/** Every stop in the cells covering a bounding box. A superset of what is in the box, by design. */
+function stopsInBox(grid: StopGrid, minLat: number, maxLat: number, minLon: number, maxLon: number): Stop[] {
+  const found: Stop[] = []
+  const latStart = Math.floor(minLat / GRID_CELL_DEGREES)
+  const latEnd = Math.floor(maxLat / GRID_CELL_DEGREES)
+  const lonStart = Math.floor(minLon / GRID_CELL_DEGREES)
+  const lonEnd = Math.floor(maxLon / GRID_CELL_DEGREES)
+  for (let latCell = latStart; latCell <= latEnd; latCell++) {
+    for (let lonCell = lonStart; lonCell <= lonEnd; lonCell++) {
+      const bucket = grid.get(`${latCell}:${lonCell}`)
+      if (bucket !== undefined) found.push(...bucket)
+    }
+  }
+  return found
+}
+
+/**
+ * The stops a vehicle drives past between `from` and `to`, in the order it reaches them.
+ *
+ * `skip` holds every stop this route already accounts for -- the ones its relation lists, plus any
+ * already inserted into an earlier gap. Excluding them is what guarantees this only ever refines a
+ * sequence and never introduces a second visit to a stop, which would let an edge run backward.
+ */
+function stopsPassedBetween(from: Stop, to: Stop, grid: StopGrid, skip: ReadonlySet<string>): Stop[] {
+  const chord: LatLng[] = [
+    [from.lat, from.lon],
+    [to.lat, to.lon],
+  ]
+  const chordMeters = haversineMeters(chord[0], chord[1])
+  if (chordMeters < 1 || chordMeters > PASSED_STOP_MAX_CHORD_METERS) return []
+
+  const index = buildRouteGeometry([{ path: chord }])
+  // A degree of latitude is ~111km, so the corridor is a very small padding on the bounding box.
+  const pad = PASSED_STOP_CORRIDOR_METERS / 111_000
+  const nearby = stopsInBox(
+    grid,
+    Math.min(from.lat, to.lat) - pad,
+    Math.max(from.lat, to.lat) + pad,
+    Math.min(from.lon, to.lon) - pad,
+    Math.max(from.lon, to.lon) + pad
+  )
+
+  const passed: { stop: Stop; alongMeters: number }[] = []
+  for (const stop of nearby) {
+    if (skip.has(stop.id)) continue
+    const projection = projectOntoRoute(index, [stop.lat, stop.lon])
+    if (projection === null) continue
+    if (projection.offRouteMeters > PASSED_STOP_CORRIDOR_METERS) continue
+    // `projectOntoRoute` clamps to the nearest end, so a stop beyond either end of the segment
+    // reports a projection sitting exactly on that endpoint. The margin drops those instead of
+    // stacking a zero-length hop onto a stop the sequence already has.
+    const along = projection.distanceTraveledMeters
+    if (along < PASSED_STOP_END_MARGIN_METERS) continue
+    if (along > chordMeters - PASSED_STOP_END_MARGIN_METERS) continue
+    passed.push({ stop, alongMeters: along })
+  }
+
+  return passed
+    .sort((a, b) => (a.alongMeters !== b.alongMeters ? a.alongMeters - b.alongMeters : a.stop.id.localeCompare(b.stop.id)))
+    .map((entry) => entry.stop)
+}
+
 /**
  * Builds the routable graph from the raw DB rows. Directed, one edge per adjacent stop pair per
  * route, following `route_stops.sequence` -- see the file header for why this doesn't also
@@ -536,6 +663,8 @@ export function buildNetworkFromDatabase(tables: TransitNetworkTables): TransitN
   // often outside the planning box even when every hop we keep is inside it.
   const allStopsById = new Map(tables.stops.map((stop) => [stop.id, stop]))
   const geometryByRoute = new Map<string, DbRouteGeometry>(tables.routeGeometries.map((g) => [g.route_id, g]))
+  // Built once for the whole network, then reused by every route's gap-filling pass.
+  const stopGrid = buildStopGrid(servedStops)
 
   const stopSequenceByRoute = new Map<string, typeof tables.routeStops>()
   for (const routeStop of tables.routeStops) {
@@ -575,6 +704,15 @@ export function buildNetworkFromDatabase(tables: TransitNetworkTables): TransitN
       return projection
     }
 
+    // Every node this route already accounts for. Seeded with the whole listed sequence so a
+    // stop the relation names later can never be inserted into an earlier gap, and grown as gaps
+    // are filled so one stop cannot be inserted into two of them.
+    const accountedFor = new Set<string>()
+    for (const routeStop of sequence) {
+      const node = nodeForStopId(routeStop.stop_id)
+      if (node !== undefined) accountedFor.add(node.id)
+    }
+
     for (let i = 0; i < sequence.length - 1; i++) {
       const from = nodeForStopId(sequence[i].stop_id)
       const to = nodeForStopId(sequence[i + 1].stop_id)
@@ -585,8 +723,18 @@ export function buildNetworkFromDatabase(tables: TransitNetworkTables): TransitN
       // sequences do, an OSM relation listing a node once per way that touches it), or the two
       // rows are the two kerbs of one stop and `mergeSplitStops` has just united them.
       if (from.id === to.id) continue
-      const road = sliceRoadBetweenStops(from, to, polyline, projectionFor(from), projectionFor(to))
-      edges.push(buildEdge(route, from, to, road, placardText))
+
+      // Stops the vehicle demonstrably drives past on this stretch but the relation never listed.
+      const passed = stopsPassedBetween(from, to, stopGrid, accountedFor)
+      for (const stop of passed) accountedFor.add(stop.id)
+
+      const hops = [from, ...passed, to]
+      for (let hop = 0; hop < hops.length - 1; hop++) {
+        const hopFrom = hops[hop]
+        const hopTo = hops[hop + 1]
+        const road = sliceRoadBetweenStops(hopFrom, hopTo, polyline, projectionFor(hopFrom), projectionFor(hopTo))
+        edges.push(buildEdge(route, hopFrom, hopTo, road, placardText))
+      }
     }
   }
 

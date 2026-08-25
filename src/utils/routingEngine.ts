@@ -606,11 +606,31 @@ export default CAVITE_PILOT_NETWORK
 // Routing
 // ---------------------------------------------------------------------------
 
-// Minutes added to the "easiest" score per service change / per walking segment, so that priority
-// heavily favors staying on one vehicle over minimizing raw time. Documented estimates (see
-// docs/cavite-network.md), tunable here.
+// Artificial cost charged for changing vehicles, on top of whatever the change costs in time or
+// money. Every priority pays it, because a transfer is expensive in ways no column in the database
+// records: you stand up, you wait for a vehicle that may not come, you flag it down, you pay a
+// second base fare, and you carry your bags across a highway to do it.
+//
+// Without this the router happily sold a second boarding to save ninety seconds. On the reported
+// Bella Vista to LPU Cavite trip that is exactly what it did -- it proposed getting off at
+// Monterey Junction and catching a second vehicle, which no local commuter would ever do. Fifteen
+// minutes is the number a rider behaves as if a transfer costs, not the number a stopwatch reads.
 const TRANSFER_PENALTY_MIN = 15
+
+// "Easiest" exists to avoid transfers at any reasonable price, so it has to stay strictly more
+// transfer-averse than "fastest" now that "fastest" pays a penalty too. Were both 15, the two tabs
+// would optimise the same quantity and collapse into the same answer on almost every trip.
+const EASIEST_TRANSFER_PENALTY_MIN = 25
+
 const WALK_PENALTY_MIN = 10
+
+// The same idea in pesos, for "cheapest", whose weight is a bill rather than a clock.
+//
+// Deliberately smaller than any base fare (the cheapest is the tricycle's). `cheapestWeight`
+// already charges a full base fare on every boarding, so cheapest is *already* minimising base
+// fares; this is the tiebreaker on top, and keeping it under one base fare is what stops it from
+// overriding a genuinely cheaper itinerary and turning this tab into a second copy of "easiest".
+const TRANSFER_PENALTY_PESOS = 6
 
 type WeightFn = (edge: RouteSegmentEdge, previousServiceId: string | null) => number
 
@@ -629,13 +649,16 @@ type WeightFn = (edge: RouteSegmentEdge, previousServiceId: string | null) => nu
  */
 function cheapestWeight(edge: RouteSegmentEdge, previousServiceId: string | null): number {
   const continuingRide = previousServiceId !== null && previousServiceId === edge.serviceId
-  if (!continuingRide) return edge.fare
+  // Boarding: the full fare, plus the standing penalty for having had to board at all. The very
+  // first boarding of a trip is unavoidable, so it is not penalised.
+  if (!continuingRide) return edge.fare + (previousServiceId === null ? 0 : TRANSFER_PENALTY_PESOS)
   if (edge.flatFare !== null) return 0
   return marginalFare(edge.vehicleClass, edge.distanceMeters / 1000)
 }
 
-function fastestWeight(edge: RouteSegmentEdge): number {
-  return edge.durationMin
+function fastestWeight(edge: RouteSegmentEdge, previousServiceId: string | null): number {
+  const isTransfer = previousServiceId !== null && previousServiceId !== edge.serviceId
+  return edge.durationMin + (isTransfer ? TRANSFER_PENALTY_MIN : 0)
 }
 
 // Penalizes a change of *service*, not just a change of mode: hopping from one jeepney to another
@@ -643,7 +666,7 @@ function fastestWeight(edge: RouteSegmentEdge): number {
 function easiestWeight(edge: RouteSegmentEdge, previousServiceId: string | null): number {
   const isTransfer = previousServiceId !== null && previousServiceId !== edge.serviceId
   const walkPenalty = edge.mode === "walk" ? WALK_PENALTY_MIN : 0
-  return edge.durationMin + (isTransfer ? TRANSFER_PENALTY_MIN : 0) + walkPenalty
+  return edge.durationMin + (isTransfer ? EASIEST_TRANSFER_PENALTY_MIN : 0) + walkPenalty
 }
 
 function weightFnFor(priority: RoutePriority): WeightFn {
