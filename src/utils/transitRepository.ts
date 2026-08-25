@@ -52,14 +52,20 @@ async function fetchAllPages<T>(page: (from: number, to: number) => PromiseLike<
   }
 }
 
+// Ordered by id for the same reason `fetchRouteStops` is ordered: without it a paged read can
+// repeat or skip rows between windows. It also makes the read *repeatable*, which
+// `mergeSplitStops` relies on -- it picks the first stop of a cluster as the survivor, so an
+// unstable row order would silently move a merged stop's id and coordinates between loads.
 export async function fetchStops(): Promise<Stop[]> {
-  return fetchAllPages<Stop>((from, to) => requireClient().from("stops").select(STOP_COLUMNS).range(from, to))
+  return fetchAllPages<Stop>((from, to) =>
+    requireClient().from("stops").select(STOP_COLUMNS).order("id", { ascending: true }).range(from, to)
+  )
 }
 
 // Only active routes: an inactive route (retired line, superseded mapping) shouldn't offer rides.
 export async function fetchRoutes(): Promise<Route[]> {
   return fetchAllPages<Route>((from, to) =>
-    requireClient().from("routes").select(ROUTE_COLUMNS).eq("is_active", true).range(from, to)
+    requireClient().from("routes").select(ROUTE_COLUMNS).eq("is_active", true).order("id", { ascending: true }).range(from, to)
   )
 }
 

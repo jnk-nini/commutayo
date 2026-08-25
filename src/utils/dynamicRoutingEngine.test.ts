@@ -5,10 +5,13 @@ import { findRoute } from "@/utils/routingEngine"
 import type { TransitNetworkTables } from "@/utils/transitRepository"
 import type { Route, RouteGeometry, RouteStop, Stop } from "@/types/transit"
 
+// The default name follows the id, because `buildNetworkFromDatabase` now folds same-named stops
+// that sit within SPLIT_STOP_MERGE_METERS into one node. A fixture that left three stops sharing
+// one name and one coordinate was describing one place, and got merged into one.
 function stop(overrides: Partial<Stop> = {}): Stop {
   return {
     id: "stop-a",
-    name: "Stop A",
+    name: `Stop ${overrides.id ?? "stop-a"}`,
     short_name: null,
     lat: 14.3,
     lon: 120.95,
