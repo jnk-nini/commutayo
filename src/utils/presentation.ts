@@ -184,8 +184,8 @@ export interface PriorityMeta {
 
 export const PRIORITY_META: Record<RoutePriority, PriorityMeta> = {
   cheapest: {
-    label: "Mura",
-    hint: "Pinakamurang pamasahe",
+    label: "Cheapest",
+    hint: "Lowest total fare",
     Icon: Wallet,
     hex: "#059669",
     badge:
@@ -193,8 +193,8 @@ export const PRIORITY_META: Record<RoutePriority, PriorityMeta> = {
     wash: "from-emerald-500/10",
   },
   fastest: {
-    label: "Bilis",
-    hint: "Pinakamabilis na biyahe",
+    label: "Fastest",
+    hint: "Shortest travel time",
     Icon: Zap,
     hex: "#b45309",
     badge:
@@ -202,8 +202,8 @@ export const PRIORITY_META: Record<RoutePriority, PriorityMeta> = {
     wash: "from-amber-500/10",
   },
   easiest: {
-    label: "Dali",
-    hint: "Pinakakonting lipat",
+    label: "Easiest",
+    hint: "Fewest transfers",
     Icon: Route,
     hex: "#0369a1",
     badge: "bg-sky-500/12 text-sky-800 ring-sky-600/25 dark:bg-sky-400/15 dark:text-sky-300 dark:ring-sky-400/30",
@@ -231,7 +231,7 @@ export function formatDuration(minutes: number): string {
   if (whole < 60) return `${whole} min`
   const hours = Math.floor(whole / 60)
   const rest = whole % 60
-  return rest === 0 ? `${hours} oras` : `${hours} oras ${rest} min`
+  return rest === 0 ? `${hours} hr` : `${hours} hr ${rest} min`
 }
 
 /** Rounds to something a person would say out loud, not a GPS reading. */

@@ -72,7 +72,7 @@ const CARTODB_ATTRIBUTION =
 const TRAVELED_COLOR = "#94a3b8"
 
 /**
- * Line style carries the same meaning here as it does in the sakay guide's timeline: a ride is a
+ * Line style carries the same meaning here as it does in the ride guide's timeline: a ride is a
  * solid stroke in its mode colour, an on-foot leg is a dashed slate stroke. That pairing is the
  * whole reason a commuter can glance between the card and the map without re-reading a legend.
  */
@@ -300,7 +300,7 @@ function StopPopup({ node, status }: { node: TransitNode; status: PinStatus }) {
             className="mt-1.5 inline-block rounded-full px-2 py-0.5 text-xs font-semibold"
             style={{ backgroundColor: PIN_FILL[status], color: "#fafafa" }}
           >
-            {status === "origin" ? "Simula" : "Destinasyon"}
+            {status === "origin" ? "Start" : "Destination"}
           </span>
         )}
         {/* The pin marks a transit bay, not a building, so say what is actually there -- when the

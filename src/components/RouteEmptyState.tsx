@@ -20,27 +20,27 @@ interface EmptyCopy {
 const EMPTY_COPY: Record<RouteEmptyReason, EmptyCopy> = {
   "pick-places": {
     Icon: MapPin,
-    title: "Saan ka galing, saan ka pupunta?",
-    body: "Pumili ng simula at destinasyon sa itaas para makita ang ruta, pamasahe, at oras ng biyahe.",
+    title: "Where are you going?",
+    body: "Pick a starting point and a destination above to see the route, the fare, and how long it takes.",
     tone: "bg-zinc-500/10 text-zinc-700 ring-zinc-500/25 dark:text-zinc-300 dark:ring-white/15",
   },
   "same-place": {
     Icon: Route,
-    title: "Pareho ang simula at destinasyon",
-    body: "Nandiyan ka na! Pumili ng ibang destinasyon para makabuo ng ruta.",
+    title: "Same start and destination",
+    body: "You are already there. Pick a different destination to plan a trip.",
     tone: "bg-sky-500/12 text-sky-800 ring-sky-600/25 dark:text-sky-300 dark:ring-sky-400/30",
   },
   "no-route": {
     Icon: TriangleAlert,
-    title: "Walang nahanap na ruta",
-    body: "Wala pang koneksyon sa pagitan ng dalawang lugar na ito sa pilot corridor. Subukan ang ibang terminal na malapit, o baligtarin ang direksyon.",
+    title: "No route found",
+    body: "We have no connection between these two places yet. Try a nearby terminal, or swap the direction.",
     tone: "bg-amber-500/12 text-amber-800 ring-amber-600/25 dark:text-amber-300 dark:ring-amber-400/30",
   },
 }
 
 export interface RouteEmptyStateProps {
   reason: RouteEmptyReason
-  /** Optional escape hatch, e.g. "Baligtarin" (swap origin and destination). */
+  /** Optional escape hatch, e.g. "Swap direction" (swap origin and destination). */
   actionLabel?: string
   onAction?: () => void
   className?: string

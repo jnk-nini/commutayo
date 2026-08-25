@@ -3,6 +3,11 @@
 //
 // Matching runs over each stop's own `aliases` list from the routing engine, so the vocabulary
 // lives with the network data and cannot drift away from it.
+//
+// The tiers run from certain to speculative: exact, prefix, word-prefix, substring, all-tokens,
+// subsequence, and finally typo-tolerant. Nothing here reaches outside our own stops table -- a
+// query naming a landmark that is not a stop is `geocoder.ts`'s job, and the picker asks it only
+// after these tiers come up short.
 
 import type { TransitNode } from "@/utils/routingEngine"
 
@@ -26,6 +31,57 @@ export function isSubsequence(query: string, text: string): boolean {
     if (cursor === query.length) return true
   }
   return false
+}
+
+/**
+ * How many single-character edits a word may be off and still count as the word the commuter meant.
+ *
+ * Scaled to length, because one wrong letter in a three-letter word usually means a different word
+ * ("sm" against "st"), while one wrong letter in "dasmarinas" is obviously a typo. Nothing under
+ * four characters is fuzzy-matched at all -- short queries are prefixes far more often than they
+ * are misspellings, and the prefix tiers above already handle those.
+ */
+function editBudget(word: string): number {
+  if (word.length < 4) return 0
+  if (word.length <= 6) return 1
+  return 2
+}
+
+/**
+ * Levenshtein distance, abandoned as soon as it is certain to exceed `budget`.
+ *
+ * The early exit is what makes this affordable: `rankPlaces` runs over ~670 stops on every
+ * keystroke, and most words differ from most other words by far more than two edits, so nearly
+ * every comparison stops after a row or two instead of filling a whole matrix.
+ */
+export function withinEditDistance(a: string, b: string, budget: number): boolean {
+  if (budget <= 0) return a === b
+  if (Math.abs(a.length - b.length) > budget) return false
+  if (a === b) return true
+
+  let previous = Array.from({ length: b.length + 1 }, (_, i) => i)
+  for (let i = 1; i <= a.length; i++) {
+    const current = [i]
+    let rowBest = i
+    for (let j = 1; j <= b.length; j++) {
+      const substitution = previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)
+      current[j] = Math.min(current[j - 1] + 1, previous[j] + 1, substitution)
+      rowBest = Math.min(rowBest, current[j])
+    }
+    // Every future row can only be larger, so once the whole row is over budget we are done.
+    if (rowBest > budget) return false
+    previous = current
+  }
+  return previous[b.length] <= budget
+}
+
+/** True when every word of the query is some word of `text`, allowing for typos in each. */
+function tokensMatchFuzzily(tokens: string[], text: string): boolean {
+  const words = text.split(" ").filter((word) => word.length > 0)
+  if (words.length === 0) return false
+  return tokens.every((token) =>
+    words.some((word) => word.startsWith(token) || withinEditDistance(token, word, editBudget(token)))
+  )
 }
 
 export interface PlaceMatch {
@@ -76,6 +132,9 @@ export function scorePlace(rawQuery: string, node: TransitNode): PlaceMatch | nu
     else if (text.includes(query)) consider(700, candidate)
     else if (tokens.length > 1 && tokens.every((token) => text.includes(token))) consider(600, candidate)
     else if (query.length >= 3 && isSubsequence(query, text)) consider(400, candidate)
+    // Last resort: the commuter typed it wrong. Ranked below every exact tier, so a real match
+    // anywhere in the network always outranks a guess at what someone meant.
+    else if (tokensMatchFuzzily(tokens, text)) consider(300, candidate)
   }
 
   return best

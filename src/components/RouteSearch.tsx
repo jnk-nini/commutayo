@@ -1,7 +1,7 @@
-// The "saan ka pupunta?" panel: a plain-language search bar, two typeahead place pickers with a
-// swap, and three priority tabs that each preview what they would cost.
+// The "where are you going?" panel: a plain-language search bar, two typeahead place pickers
+// with a swap, and three priority tabs that each preview what they would cost.
 //
-// The search bar is the fast path. A commuter types "SM Dasma to LPU mura" and all three controls
+// The search bar is the fast path. A commuter types "SM Dasma to LPU cheapest" and all three controls
 // below fill themselves in. The pickers are the always-correct fallback, and since they are now
 // comboboxes rather than native selects they accept the same nicknames the search bar does.
 //
@@ -22,9 +22,9 @@ const PRIORITY_ORDER: RoutePriority[] = ["fastest", "cheapest", "easiest"]
 
 /** Helper chips under the search bar. Each one is a real keyword the parser below understands. */
 const KEYWORD_CHIPS: { keyword: string; priority: RoutePriority }[] = [
-  { keyword: "Mura lang", priority: "cheapest" },
-  { keyword: "Walang lipat", priority: "easiest" },
-  { keyword: "Mabilis", priority: "fastest" },
+  { keyword: "Cheapest", priority: "cheapest" },
+  { keyword: "No transfers", priority: "easiest" },
+  { keyword: "Fastest", priority: "fastest" },
 ]
 
 export interface RouteSearchProps {
@@ -93,13 +93,13 @@ export function RouteSearch({
     if (nextOrigin === null || nextDest === null) {
       setHint(
         query.trim().length > 0
-          ? "Hindi ko masyadong nakuha. Pumili na lang sa dalawang kahon sa ibaba."
-          : "Pumili ng simula at destinasyon muna."
+          ? "I could not read that. Pick from the two boxes below instead."
+          : "Pick a starting point and a destination first."
       )
       return
     }
     if (nextOrigin === nextDest) {
-      setHint("Pareho ang simula at destinasyon.")
+      setHint("The start and the destination are the same.")
       return
     }
 
@@ -121,7 +121,7 @@ export function RouteSearch({
     <form onSubmit={handleSubmit} className={cn("w-full max-w-md p-4", RADIUS.panel, GLASS, className)}>
       {/* --------------------------------------------------- Natural language search */}
       <label htmlFor="commutayo-search" className="sr-only">
-        Hanapin ang ruta sa sarili mong salita
+        Search for a route in your own words
       </label>
       <div
         className={cn(
@@ -143,7 +143,7 @@ export function RouteSearch({
             setQuery(event.target.value)
             setHint(null)
           }}
-          placeholder="Hal. SM Dasma to LPU mura"
+          placeholder="e.g. SM Dasma to LPU cheapest"
           className={cn(
             "min-h-11 w-full min-w-0 bg-transparent text-sm font-medium text-zinc-900 outline-none",
             "placeholder:font-normal placeholder:text-zinc-500",
@@ -177,12 +177,12 @@ export function RouteSearch({
         <div className="min-w-0 flex-1 space-y-2">
           <PlaceCombobox
             id="route-search-origin"
-            label="Simula"
+            label="Starting point"
             Icon={MapPin}
             nodes={nodes}
             value={originId}
             excludeId={destId}
-            placeholder="Saan ka galing?"
+            placeholder="Where are you coming from?"
             onChange={(id) => {
               onOriginChange(id)
               setHint(null)
@@ -190,12 +190,12 @@ export function RouteSearch({
           />
           <PlaceCombobox
             id="route-search-dest"
-            label="Destinasyon"
+            label="Destination"
             Icon={Flag}
             nodes={nodes}
             value={destId}
             excludeId={originId}
-            placeholder="Saan ka pupunta?"
+            placeholder="Where are you going?"
             onChange={(id) => {
               onDestChange(id)
               setHint(null)
@@ -207,7 +207,7 @@ export function RouteSearch({
           type="button"
           onClick={handleSwap}
           disabled={!canSwap}
-          aria-label="Palitan ang simula at destinasyon"
+          aria-label="Swap start and destination"
           className={cn(
             "flex size-11 shrink-0 items-center justify-center",
             RADIUS.control,
@@ -225,7 +225,7 @@ export function RouteSearch({
       </div>
 
       {/* ----------------------------------------------------------------- Priority */}
-      <div role="tablist" aria-label="Ano ang mas importante sa'yo?" className="mt-3 flex gap-1.5">
+      <div role="tablist" aria-label="What matters most to you?" className="mt-3 flex gap-1.5">
         {PRIORITY_ORDER.map((id) => {
           const meta = PRIORITY_META[id]
           const isActive = id === selectedPriority
@@ -262,7 +262,7 @@ export function RouteSearch({
               </span>
               {/* Preview what each option actually costs, so you can compare before committing. */}
               <span className={cn("block text-xs tabular-nums", isActive ? "opacity-85" : "opacity-70")}>
-                {preview === null ? "walang ruta" : `₱${preview.totalFare} / ${Math.round(preview.totalDurationMin)}m`}
+                {preview === null ? "no route" : `₱${preview.totalFare} / ${Math.round(preview.totalDurationMin)}m`}
               </span>
             </button>
           )
@@ -282,7 +282,7 @@ export function RouteSearch({
           FOCUS
         )}
       >
-        Hanapin ang ruta
+        Find the route
         <ArrowRight className={ICON.sm} aria-hidden />
       </button>
 
@@ -304,10 +304,13 @@ export function RouteSearch({
 /* Plain-language query parsing                                                                   */
 /* -------------------------------------------------------------------------------------------- */
 
+// The interface is English now; what people type into a search box is not. These keep both, and
+// cost nothing to carry -- a commuter who types "mura" or "walang lipat" still gets what they
+// asked for, which is the entire point of a plain-language search bar.
 const PRIORITY_ALIASES: { priority: RoutePriority; aliases: string[] }[] = [
   {
     priority: "easiest",
-    aliases: ["walang lipat", "wala lipat", "no transfer", "one ride", "direkta", "easiest", "easy", "madali", "dali"],
+    aliases: ["walang lipat", "wala lipat", "no transfers", "no transfer", "one ride", "direct", "direkta", "easiest", "easy", "madali", "dali"],
   },
   { priority: "cheapest", aliases: ["mura lang", "cheapest", "cheap", "mura", "tipid", "budget", "murang"] },
   { priority: "fastest", aliases: ["mabilis", "fastest", "fast", "bilis", "mabilisan", "rush"] },
@@ -340,7 +343,7 @@ export interface ParsedQuery {
 }
 
 /**
- * Reads a free-text query like "SM Dasma to LPU mura" into a trip.
+ * Reads a free-text query like "SM Dasma to LPU cheapest" into a trip.
  *
  * Deliberately dumb: it walks the string left to right and takes the first two places it meets, so
  * word order alone decides origin and destination and the word "to" is optional. Anything it can't
