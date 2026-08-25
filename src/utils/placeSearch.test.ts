@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import { isSubsequence, normalizeQuery, rankPlaces, scorePlace } from "@/utils/placeSearch"
-import { CAVITE_PILOT_NODES } from "@/utils/routingEngine"
+import { CAVITE_PILOT_NODES, type TransitNode } from "@/utils/routingEngine"
 
 const nodeById = (id: string) => CAVITE_PILOT_NODES.find((node) => node.id === id)!
 
@@ -79,5 +79,39 @@ describe("ranking", () => {
 
   it("returns nothing for a query that matches no stop", () => {
     expect(rankPlaces("qqzzxx", CAVITE_PILOT_NODES)).toHaveLength(0)
+  })
+})
+
+describe("word-boundary ranking", () => {
+  // Regression for a real QA report: typing "SM Dasma" buried SM City Dasmarinas at position 16 of
+  // 25 on the live network, because "sm" occurs inside "da-sm-arinas" and every Dasmarinas stop
+  // matched on a plain substring check, after which ties broke alphabetically. See `startsAWord`.
+  const stop = (id: string, name: string, shortName = name): TransitNode => ({
+    id,
+    name,
+    shortName,
+    lat: 14.3,
+    lng: 120.95,
+    city: "",
+    isTerminal: false,
+    aliases: [],
+    waitingSpot: "",
+  })
+
+  const pool = [
+    stop("camella", "Camella Homes Dasmarinas"),
+    stop("boundary", "Dasma/Silang Boundary"),
+    stop("arena", "Dasmarinas Arena"),
+    stop("sm-dasma", "SM City Dasmarinas", "SM Dasma"),
+  ]
+
+  it("puts the stop whose words actually start with the query first", () => {
+    expect(rankPlaces("SM Dasma", pool)[0].node.id).toBe("sm-dasma")
+  })
+
+  it("still finds the coincidental matches, just ranked below", () => {
+    const ranked = rankPlaces("SM Dasma", pool)
+    expect(ranked.map((match) => match.node.id)).toContain("camella")
+    expect(ranked[0].score).toBeGreaterThan(ranked[1].score)
   })
 })

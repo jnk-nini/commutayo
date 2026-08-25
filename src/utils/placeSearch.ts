@@ -4,8 +4,8 @@
 // Matching runs over each stop's own `aliases` list from the routing engine, so the vocabulary
 // lives with the network data and cannot drift away from it.
 //
-// The tiers run from certain to speculative: exact, prefix, word-prefix, substring, all-tokens,
-// subsequence, and finally typo-tolerant. Nothing here reaches outside our own stops table -- a
+// The tiers run from certain to speculative: exact, prefix, word-prefix, substring, all-tokens-at-
+// word-boundaries, all-tokens-anywhere, subsequence, and finally typo-tolerant. Nothing here reaches outside our own stops table -- a
 // query naming a landmark that is not a stop is `geocoder.ts`'s job, and the picker asks it only
 // after these tiers come up short.
 
@@ -75,6 +75,20 @@ export function withinEditDistance(a: string, b: string, budget: number): boolea
   return previous[b.length] <= budget
 }
 
+/**
+ * True when some word of `text` begins with `token`.
+ *
+ * This is what separates a real match from a coincidence, and it is worth the extra tier. On the
+ * live network, "sm dasma" put SM City Dasmarinas at position **16 of 25**: the letters "sm" occur
+ * inside "da-sm-arinas", so every Dasmarinas stop in Cavite satisfied a plain `includes` check for
+ * both words, and the ties then broke alphabetically -- burying the one stop the commuter meant
+ * under Camella Homes, Dasma/Silang Boundary and the rest. Requiring a word boundary drops those
+ * to the tier below and puts SM back at the top.
+ */
+function startsAWord(text: string, token: string): boolean {
+  return text.split(" ").some((word) => word.startsWith(token))
+}
+
 /** True when every word of the query is some word of `text`, allowing for typos in each. */
 function tokensMatchFuzzily(tokens: string[], text: string): boolean {
   const words = text.split(" ").filter((word) => word.length > 0)
@@ -130,7 +144,12 @@ export function scorePlace(rawQuery: string, node: TransitNode): PlaceMatch | nu
     else if (text.startsWith(query)) consider(900, candidate)
     else if (text.split(" ").some((word) => word.startsWith(query))) consider(800, candidate)
     else if (text.includes(query)) consider(700, candidate)
-    else if (tokens.length > 1 && tokens.every((token) => text.includes(token))) consider(600, candidate)
+    // Every query word starts a word of the name. Strong: "sm dasma" lands on "SM City Dasmarinas"
+    // because "sm" is a whole word there, not because the letters happen to occur somewhere.
+    else if (tokens.length > 1 && tokens.every((token) => startsAWord(text, token))) consider(600, candidate)
+    // Every query word appears *somewhere*, word boundaries ignored. Kept for recall and ranked
+    // below the tier above, because this is the one that fires on coincidences.
+    else if (tokens.length > 1 && tokens.every((token) => text.includes(token))) consider(500, candidate)
     else if (query.length >= 3 && isSubsequence(query, text)) consider(400, candidate)
     // Last resort: the commuter typed it wrong. Ranked below every exact tier, so a real match
     // anywhere in the network always outranks a guess at what someone meant.

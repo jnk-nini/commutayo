@@ -12,8 +12,14 @@ dist
 dist-ssr
 *.local
 
-# Raw OSM ingestion cache -- large, regenerable, not source
-data/
+# Raw OSM ingestion cache -- large, regenerable, not source. Globbed rather than ignoring the
+# whole directory, because git will not look inside an ignored directory and the negation below
+# would never be reached.
+data/*
+
+# Hand-authored routes are the opposite of the cache above: they are source, they are the only
+# copy, and nothing can regenerate them. See data/custom-routes/README.md.
+!data/custom-routes/
 
 # Dead end: hand-built SQL batches from before SUPABASE_SERVICE_ROLE_KEY existed. Generated but
 # never applied (the real write went through scripts/push-ingest-output.ts), 4.4MB, and

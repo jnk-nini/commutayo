@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "ingest:osm": "node scripts/ingest-osm.ts"
+    "ingest:osm": "node scripts/ingest-osm.ts",
+    "routes:custom": "node scripts/push-custom-routes.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

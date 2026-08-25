@@ -1,0 +1,52 @@
+{
+  "_comment": [
+    "TEMPLATE, AND A REAL GAP. This is the line the QA report is about: the jeepney that carries",
+    "people from the General Trias side straight through to SM Dasmarinas / Pala-Pala without a",
+    "transfer. It is genuinely missing from OpenStreetMap -- verified 2026-08-26 against the live",
+    "database, where the only services boarding at Bella Vista are SM Molino, Trece Martires, and",
+    "the two BT Vista Mall runs.",
+    "",
+    "It is left as \"draft\": true because the intermediate stops below are a guess at the line, not",
+    "a survey of it, and a guessed stop list is worse than none -- it would put confident wrong",
+    "directions in front of a commuter. Ride the route (or ask someone who does), replace the stops",
+    "marked NEEDS SURVEY with what the jeepney actually calls at, set \"draft\" to false, and run:",
+    "",
+    "  node scripts/push-custom-routes.ts --only gentri-dasma-jeepney",
+    "",
+    "The two endpoints and Pala-Pala are real stops already in the database, so those lines can",
+    "stay as they are."
+  ],
+
+  "slug": "gentri-dasma-jeepney",
+  "name": "Jeepney: General Trias to SM Dasmarinas via Pala-Pala",
+  "vehicleClass": "jeepney_traditional",
+  "ref": null,
+  "flatFare": null,
+  "notes": "NEEDS SURVEY. Reported by a commuter 2026-08-26 as a single-seat ride that the app was missing. Stop list below is unverified.",
+  "draft": true,
+
+  "directions": [
+    {
+      "headsign": "SM DASMARIÑAS",
+      "stops": [
+        { "stop": "Bella Vista" },
+        { "stop": "General Trias Sports Park" },
+        { "stop": "Vista Mall General Trias Transport Terminal" },
+        { "stop": "Pala-Pala Transport Terminal" },
+        { "stop": "Robinsons Place Dasmariñas", "near": [14.300918, 120.954297] },
+        { "stop": "SM City Dasmariñas Transport Terminal" }
+      ]
+    },
+    {
+      "headsign": "GENERAL TRIAS",
+      "stops": [
+        { "stop": "SM City Dasmariñas Transport Terminal" },
+        { "stop": "Robinsons Place Dasmariñas", "near": [14.299997, 120.954356] },
+        { "stop": "Pala-Pala Transport Terminal" },
+        { "stop": "Vista Mall General Trias Transport Terminal" },
+        { "stop": "General Trias Sports Park" },
+        { "stop": "Bella Vista" }
+      ]
+    }
+  ]
+}
