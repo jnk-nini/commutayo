@@ -19,6 +19,15 @@ import { rankPlaces } from "@/utils/placeSearch"
 import { FOCUS, ICON, RADIUS } from "@/utils/presentation"
 import type { TransitNode } from "@/utils/routingEngine"
 
+/**
+ * How many options the list will actually render. `rankPlaces` scores and returns every stop it
+ * matches, which on the Cavite-wide network is ~800 of them for an empty query -- building that
+ * many option buttons every time the field is focused is a visible stall on a phone, and nobody
+ * scrolls past the first screenful anyway. Ranking is untouched: this caps the DOM, not the search,
+ * so the best matches are still the ones that survive the cut.
+ */
+const MAX_VISIBLE_OPTIONS = 50
+
 export interface PlaceComboboxProps {
   id: string
   label: string
@@ -56,10 +65,15 @@ export function PlaceCombobox({
 
   const selected = useMemo(() => nodes.find((node) => node.id === value) ?? null, [nodes, value])
 
-  const matches = useMemo(() => {
+  const ranked = useMemo(() => {
     const pool = excludeId === null ? nodes : nodes.filter((node) => node.id !== excludeId)
     return rankPlaces(query, pool)
   }, [nodes, excludeId, query])
+
+  // Everything below navigates and announces the *rendered* list, so keyboard arrows, Enter and
+  // aria-activedescendant can never point at an option that isn't on screen.
+  const matches = useMemo(() => ranked.slice(0, MAX_VISIBLE_OPTIONS), [ranked])
+  const hiddenCount = ranked.length - matches.length
 
   // While closed the field shows the chosen stop; while open it shows what is being typed. Without
   // this the input would either wipe the selection on focus or trap the old name in the box.
@@ -218,6 +232,11 @@ export function PlaceCombobox({
               {matches.map((match, index) => {
                 const isActive = index === activeIndex
                 const isSelected = match.node.id === value
+                // OSM-imported stops carry no city, so the subtitle is assembled from whatever is
+                // actually known instead of rendering an empty line under every name.
+                const subtitle = [match.node.city, match.matchedAlias === null ? "" : `(${match.matchedAlias})`]
+                  .filter((part) => part.length > 0)
+                  .join(" ")
                 return (
                   <li key={match.node.id}>
                     <button
@@ -237,10 +256,9 @@ export function PlaceCombobox({
                         <span className="block truncate text-sm font-semibold text-zinc-900 dark:text-zinc-50">
                           {match.node.shortName}
                         </span>
-                        <span className="block truncate text-xs text-zinc-600 dark:text-zinc-300">
-                          {match.node.city}
-                          {match.matchedAlias !== null && ` (${match.matchedAlias})`}
-                        </span>
+                        {subtitle.length > 0 && (
+                          <span className="block truncate text-xs text-zinc-600 dark:text-zinc-300">{subtitle}</span>
+                        )}
                       </span>
                       {isSelected && (
                         <Check className={cn(ICON.sm, "shrink-0 text-emerald-600 dark:text-emerald-400")} aria-hidden />
@@ -249,6 +267,16 @@ export function PlaceCombobox({
                   </li>
                 )
               })}
+
+              {/* Says the list was cut rather than letting it look like the whole network. */}
+              {hiddenCount > 0 && (
+                <li
+                  aria-hidden
+                  className="px-3 py-2 text-xs text-zinc-500 dark:text-zinc-400"
+                >
+                  +{hiddenCount} pang lugar. Mag-type pa para umikli ang listahan.
+                </li>
+              )}
             </ul>
           </motion.div>
         )}

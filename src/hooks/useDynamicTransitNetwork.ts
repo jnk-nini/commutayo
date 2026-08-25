@@ -1,10 +1,13 @@
 // Loads the Cavite-wide network from Supabase, behind the DYNAMIC_NETWORK_ENABLED feature flag.
-// The UI doesn't call this yet -- App.tsx still routes over the hardcoded pilot network -- but
-// this is the hook it will switch to once the database is populated and checked. When the flag is
-// off, this resolves to "disabled" immediately and never touches Supabase, so it's safe to import
-// and leave unused during the transition.
+// When the flag is off, this resolves to "disabled" immediately and never touches Supabase, so the
+// pilot corridor keeps working untouched in a dev environment with no .env.local at all.
+//
+// The network is fetched and built exactly once per mount. Everything downstream -- all three
+// priority solves, every re-render of the map -- runs against that one in-memory graph, because
+// building it means reading four tables and walking ~127k polyline points, which is not something
+// to redo when someone taps a priority tab.
 
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 
 import { DYNAMIC_NETWORK_ENABLED, loadDynamicNetwork } from "@/utils/dynamicRoutingEngine"
 import type { TransitNetwork } from "@/utils/routingEngine"
@@ -15,12 +18,15 @@ export interface UseDynamicTransitNetworkResult {
   status: DynamicNetworkStatus
   network: TransitNetwork | null
   error: Error | null
+  /** Re-runs the fetch. Wired to the retry button on the error card. */
+  reload: () => void
 }
 
 export function useDynamicTransitNetwork(): UseDynamicTransitNetworkResult {
   const [status, setStatus] = useState<DynamicNetworkStatus>(DYNAMIC_NETWORK_ENABLED ? "loading" : "disabled")
   const [network, setNetwork] = useState<TransitNetwork | null>(null)
   const [error, setError] = useState<Error | null>(null)
+  const [attempt, setAttempt] = useState(0)
 
   useEffect(() => {
     if (!DYNAMIC_NETWORK_ENABLED) return
@@ -31,6 +37,7 @@ export function useDynamicTransitNetwork(): UseDynamicTransitNetworkResult {
       .then((loaded) => {
         if (cancelled) return
         setNetwork(loaded)
+        setError(null)
         setStatus("ready")
       })
       .catch((err: unknown) => {
@@ -42,7 +49,14 @@ export function useDynamicTransitNetwork(): UseDynamicTransitNetworkResult {
     return () => {
       cancelled = true
     }
+  }, [attempt])
+
+  const reload = useCallback(() => {
+    if (!DYNAMIC_NETWORK_ENABLED) return
+    setStatus("loading")
+    setError(null)
+    setAttempt((current) => current + 1)
   }, [])
 
-  return { status, network, error }
+  return { status, network, error, reload }
 }

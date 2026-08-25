@@ -15,6 +15,15 @@ dist-ssr
 # Raw OSM ingestion cache -- large, regenerable, not source
 data/
 
+# Dead end: hand-built SQL batches from before SUPABASE_SERVICE_ROLE_KEY existed. Generated but
+# never applied (the real write went through scripts/push-ingest-output.ts), 4.4MB, and
+# regenerable at any time by running generate-sql.mjs against the JSON beside it.
+scripts/.ingest-output/sql_batches/
+
+# TS project-reference build artifacts. `tsc -b` emits these; the repo's own check is
+# `tsc -p tsconfig.app.json --noEmit`, which does not.
+*.tsbuildinfo
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

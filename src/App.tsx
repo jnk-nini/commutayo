@@ -49,6 +49,7 @@ import RouteEmptyState, { type RouteEmptyReason } from "@/components/RouteEmptyS
 import RouteResultCard from "@/components/RouteResultCard"
 import RouteSearch from "@/components/RouteSearch"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { useDynamicTransitNetwork } from "@/hooks/useDynamicTransitNetwork"
 import { useGeolocation, type GeolocationStatus } from "@/hooks/useGeolocation"
 import {
   useTripProgress,
@@ -57,6 +58,7 @@ import {
   type TripProgress,
 } from "@/hooks/useTripProgress"
 import { cn } from "@/lib/utils"
+import { DYNAMIC_NETWORK_ENABLED, selectableNodes } from "@/utils/dynamicRoutingEngine"
 import { formatPeso } from "@/utils/fares"
 import {
   FOCUS,
@@ -71,12 +73,19 @@ import {
   formatDuration,
   formatMeters,
 } from "@/utils/presentation"
-import { CAVITE_PILOT_NODES, findRoutes, type RoutePriority, type RouteResult } from "@/utils/routingEngine"
+import CAVITE_PILOT_NETWORK, {
+  CAVITE_PILOT_NODES,
+  findRoute,
+  type RoutePriority,
+  type RouteResult,
+  type TransitNetwork,
+} from "@/utils/routingEngine"
 
-const DEFAULT_ORIGIN = "sm-dasma"
-const DEFAULT_DEST = "lpu-gentri"
-
-const NODE_NAME = new Map(CAVITE_PILOT_NODES.map((node) => [node.id, node.name]))
+// Only meaningful against the pilot corridor: these are hand-authored node ids, and the Cavite-wide
+// network keys stops by UUID, where no such id exists. Dynamic mode opens with nothing picked and
+// leans on the "pick-places" empty state, rather than inventing a default trip from imported data.
+const DEFAULT_ORIGIN = DYNAMIC_NETWORK_ENABLED ? null : "sm-dasma"
+const DEFAULT_DEST = DYNAMIC_NETWORK_ENABLED ? null : "lpu-gentri"
 
 /** How much of the bottom sheet stays on screen when it is collapsed. Enough for the search bar. */
 const SHEET_PEEK_PX = 236
@@ -220,6 +229,23 @@ function App() {
   const isDesktop = useIsDesktop()
   const reduceMotion = useReducedMotion()
 
+  // Off by default. With VITE_USE_DYNAMIC_NETWORK unset this stays "disabled", never touches
+  // Supabase, and every line below falls through to the pilot corridor exactly as before.
+  const dynamic = useDynamicTransitNetwork()
+  const network: TransitNetwork | null = DYNAMIC_NETWORK_ENABLED ? dynamic.network : CAVITE_PILOT_NETWORK
+
+  // What the pickers offer. The full node list would include unnamed OSM nodes and stops no vehicle
+  // serves, which are legitimate graph members but not choosable endpoints -- see selectableNodes.
+  const placeNodes = useMemo(() => {
+    if (!DYNAMIC_NETWORK_ENABLED) return CAVITE_PILOT_NODES
+    return network === null ? [] : selectableNodes(network)
+  }, [network])
+
+  const nodeNameById = useMemo(
+    () => new Map((network?.nodes ?? []).map((node) => [node.id, node.name])),
+    [network]
+  )
+
   const [originId, setOriginId] = useState<string | null>(DEFAULT_ORIGIN)
   const [destId, setDestId] = useState<string | null>(DEFAULT_DEST)
   const [priority, setPriority] = useState<RoutePriority>("fastest")
@@ -237,20 +263,28 @@ function App() {
     document.documentElement.classList.toggle("dark", isDark)
   }, [isDark])
 
-  // The engine is synchronous and deterministic, so a search is just a memo and there is no real
-  // loading state to show. Solving all three priorities at once lets each tab preview its own fare
-  // and time. A throw here becomes an empty state instead of a crash.
+  // Once the graph is in memory the engine is synchronous and deterministic, so a search is just a
+  // memo -- the only wait in the whole app is the one-off network load, not the solve. Solving all
+  // three priorities at once lets each tab preview its own fare and time. A throw here becomes an
+  // empty state instead of a crash.
   const solved = useMemo(() => {
-    if (originId === null || destId === null || originId === destId) {
+    if (network === null || originId === null || destId === null || originId === destId) {
       return { routes: null, failed: false }
     }
     try {
-      return { routes: findRoutes(originId, destId), failed: false }
+      return {
+        routes: {
+          cheapest: findRoute(network, originId, destId, "cheapest"),
+          fastest: findRoute(network, originId, destId, "fastest"),
+          easiest: findRoute(network, originId, destId, "easiest"),
+        },
+        failed: false,
+      }
     } catch (error) {
       console.error("CommuTayo routing failed", error)
       return { routes: null, failed: true }
     }
-  }, [originId, destId])
+  }, [network, originId, destId])
 
   const routes = solved.routes
   const activeRoute: RouteResult | null = routes?.[priority] ?? null
@@ -403,6 +437,9 @@ function App() {
 
   // --------------------------------------------------------------- Shared pieces
 
+  const networkLoading = DYNAMIC_NETWORK_ENABLED && dynamic.status === "loading"
+  const networkFailed = DYNAMIC_NETWORK_ENABLED && dynamic.status === "error"
+
   const header = (
     <AppHeader
       isDark={isDark}
@@ -411,13 +448,33 @@ function App() {
       canReport={activeRoute !== null}
       reported={alreadyReported !== undefined}
       floating={!isDesktop}
+      scopeLabel={
+        DYNAMIC_NETWORK_ENABLED
+          ? networkLoading
+            ? "Kinukuha ang network"
+            : `Buong Cavite · ${placeNodes.length} hintuan`
+          : "Aguinaldo Highway spine"
+      }
     />
   )
 
-  const planner = (
+  const planner = networkFailed ? (
+    <NetworkStateCard
+      title="Hindi makuha ang network ng ruta"
+      body="Hindi ma-abot ang database ng hintuan at ruta. Tingnan ang koneksyon mo, tapos subukan ulit."
+      detail={dynamic.error?.message}
+      onRetry={dynamic.reload}
+    />
+  ) : networkLoading ? (
+    <NetworkStateCard
+      loading
+      title="Hinahanda ang buong Cavite"
+      body="Kinukuha ang mga hintuan, ruta at daan mula sa database. Isang beses lang ito bawat pagbukas."
+    />
+  ) : (
     <>
       <RouteSearch
-        nodes={CAVITE_PILOT_NODES}
+        nodes={placeNodes}
         originId={originId}
         destId={destId}
         selectedPriority={priority}
@@ -466,7 +523,9 @@ function App() {
       <p className="max-w-md px-2 pb-1 text-center text-xs leading-relaxed text-zinc-600 dark:text-zinc-300">
         {solved.failed
           ? "May aberya sa paghahanap ng ruta. Subukan ang ibang tapat o baligtarin ang direksyon."
-          : "Tantiya mula sa corridor spec ang pamasahe, oras at signboard dito. Hindi pa ito sinusukat sa kalsada."}
+          : DYNAMIC_NETWORK_ENABLED
+            ? "Galing sa OpenStreetMap ang mga ruta at hintuan dito. Tantiya lang ang pamasahe at oras, at hindi pa sinusukat sa kalsada ang alinman dito."
+            : "Tantiya mula sa corridor spec ang pamasahe, oras at signboard dito. Hindi pa ito sinusukat sa kalsada."}
       </p>
     </>
   )
@@ -490,7 +549,26 @@ function App() {
         userFix={geo.fix}
         progress={progress}
         tracking={isTracking}
+        nodes={network?.nodes ?? []}
       />
+
+      {/* The map is real but empty until the network lands, which without a word on it reads as a
+          broken map rather than a loading one. */}
+      {networkLoading && (
+        <div className={cn("pointer-events-none absolute inset-x-0 top-4 flex justify-center", Z.header)}>
+          <span
+            className={cn(
+              "pointer-events-auto flex items-center gap-2 px-3.5 py-2 text-xs font-semibold",
+              RADIUS.pill,
+              GLASS_STRONG,
+              "text-zinc-700 dark:text-zinc-200"
+            )}
+          >
+            <LoaderCircle className={cn(ICON.xs, "animate-spin motion-reduce:animate-none")} aria-hidden />
+            Kinukuha ang mga hintuan
+          </span>
+        </div>
+      )}
     </AppErrorBoundary>
   )
 
@@ -535,8 +613,8 @@ function App() {
         open={feedbackOpen}
         onOpenChange={setFeedbackOpen}
         route={activeRoute}
-        originName={originId === null ? null : (NODE_NAME.get(originId) ?? originId)}
-        destName={destId === null ? null : (NODE_NAME.get(destId) ?? destId)}
+        originName={originId === null ? null : (nodeNameById.get(originId) ?? originId)}
+        destName={destId === null ? null : (nodeNameById.get(destId) ?? destId)}
         alreadyReported={alreadyReported}
         onSubmit={submitFeedback}
       />
@@ -558,9 +636,11 @@ interface AppHeaderProps {
   reported: boolean
   /** Mobile: the bar floats as glass over the map, so it needs its own surface and shadow. */
   floating: boolean
+  /** What network is loaded, in the badge under the wordmark. */
+  scopeLabel: string
 }
 
-function AppHeader({ isDark, onToggleDark, onReport, canReport, reported, floating }: AppHeaderProps) {
+function AppHeader({ isDark, onToggleDark, onReport, canReport, reported, floating, scopeLabel }: AppHeaderProps) {
   return (
     <header
       className={cn(
@@ -580,7 +660,7 @@ function AppHeader({ isDark, onToggleDark, onReport, canReport, reported, floati
           )}
         >
           <Zap className={cn(ICON.xs, "shrink-0")} aria-hidden />
-          <span className="truncate">Aguinaldo Highway spine</span>
+          <span className="truncate">{scopeLabel}</span>
         </span>
       </div>
 
@@ -1010,6 +1090,66 @@ function ToastBanner({
         </motion.div>
       )}
     </AnimatePresence>
+  )
+}
+
+/**
+ * The planner's stand-in while the Cavite-wide network is loading, or after it failed. Occupies the
+ * same slot and width as RouteSearch so the column doesn't jump when the real controls arrive.
+ */
+function NetworkStateCard({
+  title,
+  body,
+  detail,
+  loading = false,
+  onRetry,
+}: {
+  title: string
+  body: string
+  /** The raw failure message, kept small and secondary -- useful in dev, ignorable otherwise. */
+  detail?: string
+  loading?: boolean
+  onRetry?: () => void
+}) {
+  return (
+    <div className={cn("w-full max-w-md p-5", RADIUS.panel, GLASS)} role="status" aria-live="polite">
+      <div className="flex items-start gap-3">
+        {loading ? (
+          <LoaderCircle
+            className={cn(ICON.md, "mt-0.5 shrink-0 animate-spin text-emerald-700 motion-reduce:animate-none dark:text-emerald-400")}
+            aria-hidden
+          />
+        ) : (
+          <TriangleAlert className={cn(ICON.md, "mt-0.5 shrink-0 text-amber-600 dark:text-amber-400")} aria-hidden />
+        )}
+        <div className="min-w-0 flex-1">
+          <h2 className="text-sm font-bold tracking-tight text-zinc-900 dark:text-zinc-50">{title}</h2>
+          <p className="mt-1 text-xs leading-relaxed text-zinc-600 dark:text-zinc-300">{body}</p>
+          {detail !== undefined && detail.length > 0 && (
+            <p className="mt-2 truncate text-xs font-medium text-rose-700 dark:text-rose-400" title={detail}>
+              {detail}
+            </p>
+          )}
+        </div>
+      </div>
+
+      {onRetry !== undefined && (
+        <button
+          type="button"
+          onClick={onRetry}
+          className={cn(
+            "mt-4 flex min-h-11 w-full items-center justify-center gap-1.5 px-4 text-sm font-semibold",
+            RADIUS.control,
+            "bg-zinc-900 text-zinc-50 hover:bg-zinc-800 dark:bg-zinc-50 dark:text-zinc-900 dark:hover:bg-white",
+            PRESS,
+            FOCUS
+          )}
+        >
+          <RefreshCw className={ICON.sm} aria-hidden />
+          Subukan ulit
+        </button>
+      )}
+    </div>
   )
 }
 

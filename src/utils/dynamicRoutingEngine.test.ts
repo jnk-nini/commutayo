@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { buildNetworkFromDatabase } from "@/utils/dynamicRoutingEngine"
+import { buildNetworkFromDatabase, selectableNodes } from "@/utils/dynamicRoutingEngine"
 import { findRoute } from "@/utils/routingEngine"
 import type { TransitNetworkTables } from "@/utils/transitRepository"
 import type { Route, RouteGeometry, RouteStop, Stop } from "@/types/transit"
@@ -86,6 +86,96 @@ describe("buildNetworkFromDatabase", () => {
     expect(result?.transferCount).toBe(0)
   })
 
+  // Regression: the base fare is paid once per boarding, not once per stop the vehicle passes.
+  // Summing each segment's fare charged a multi-stop ride one base fare per segment -- ~3x on a
+  // real PITX-Dasmariñas trip. Only visible once segments share a serviceId, which is exactly what
+  // the DB model does and the pilot's per-segment serviceIds never did.
+  it("charges one matrix fare for a whole ride, not a base fare per segment", () => {
+    const stops: Stop[] = [
+      stop({ id: "a", name: "A", lat: 14.30, lon: 120.95 }),
+      stop({ id: "b", name: "B", lat: 14.32, lon: 120.95 }),
+      stop({ id: "c", name: "C", lat: 14.34, lon: 120.95 }),
+      stop({ id: "d", name: "D", lat: 14.36, lon: 120.95 }),
+    ]
+    const routeStops: RouteStop[] = [
+      { id: "rs1", route_id: "route-a", stop_id: "a", sequence: 0, role: null },
+      { id: "rs2", route_id: "route-a", stop_id: "b", sequence: 1, role: null },
+      { id: "rs3", route_id: "route-a", stop_id: "c", sequence: 2, role: null },
+      { id: "rs4", route_id: "route-a", stop_id: "d", sequence: 3, role: null },
+    ]
+
+    const network = buildNetworkFromDatabase(tables({ stops, routes: [route()], routeStops }))
+    const result = findRoute(network, "a", "d", "cheapest")
+
+    expect(result?.steps).toHaveLength(1)
+    const ride = result!.steps[0]
+    // Traditional jeepney: ₱13 covers the first 4 km, then ₱1.80/km. Three ~2.2 km hops is ~6.7 km.
+    const expected = 13 + Math.max(0, ride.distanceMeters / 1000 - 4) * 1.8
+    expect(ride.fare).toBe(Math.round(expected))
+    // The bug summed three independent segment fares, each carrying its own ₱13 base.
+    expect(ride.fare).toBeLessThan(39)
+  })
+
+  // The cheapest tab must never quote more than the other two. It did on live data once merged
+  // rides were priced as one fare: the router still scored each segment at a full base fare, so it
+  // optimised a cost nobody was charged and picked a route the easiest tab beat on price.
+  it("never quotes more on the cheapest priority than on the fastest or easiest", () => {
+    // Two ways from a to d: a slow direct one-vehicle ride, and a quick two-vehicle hop.
+    const stops: Stop[] = [
+      stop({ id: "a", name: "A", lat: 14.30, lon: 120.95 }),
+      stop({ id: "b", name: "B", lat: 14.33, lon: 120.95 }),
+      stop({ id: "c", name: "C", lat: 14.36, lon: 120.95 }),
+      stop({ id: "d", name: "D", lat: 14.39, lon: 120.95 }),
+    ]
+    const routeStops: RouteStop[] = [
+      // route-through: a -> b -> c -> d on one jeepney, so all three segments merge.
+      { id: "t1", route_id: "route-through", stop_id: "a", sequence: 0, role: null },
+      { id: "t2", route_id: "route-through", stop_id: "b", sequence: 1, role: null },
+      { id: "t3", route_id: "route-through", stop_id: "c", sequence: 2, role: null },
+      { id: "t4", route_id: "route-through", stop_id: "d", sequence: 3, role: null },
+      // route-express: a -> d on a bus, one boarding but a pricier class.
+      { id: "e1", route_id: "route-express", stop_id: "a", sequence: 0, role: null },
+      { id: "e2", route_id: "route-express", stop_id: "d", sequence: 1, role: null },
+    ]
+
+    const network = buildNetworkFromDatabase(
+      tables({
+        stops,
+        routes: [route({ id: "route-through" }), route({ id: "route-express", vehicle_class: "bus" })],
+        routeStops,
+      })
+    )
+
+    const cheapest = findRoute(network, "a", "d", "cheapest")
+    const fastest = findRoute(network, "a", "d", "fastest")
+    const easiest = findRoute(network, "a", "d", "easiest")
+
+    expect(cheapest).not.toBeNull()
+    expect(cheapest!.totalFare).toBeLessThanOrEqual(fastest!.totalFare)
+    expect(cheapest!.totalFare).toBeLessThanOrEqual(easiest!.totalFare)
+  })
+
+  it("charges a flat-fare service once for a merged ride, not once per segment", () => {
+    const stops: Stop[] = [
+      stop({ id: "a", name: "A", lat: 14.30, lon: 120.95 }),
+      stop({ id: "b", name: "B", lat: 14.32, lon: 120.95 }),
+      stop({ id: "c", name: "C", lat: 14.34, lon: 120.95 }),
+    ]
+    const routeStops: RouteStop[] = [
+      { id: "rs1", route_id: "route-a", stop_id: "a", sequence: 0, role: null },
+      { id: "rs2", route_id: "route-a", stop_id: "b", sequence: 1, role: null },
+      { id: "rs3", route_id: "route-a", stop_id: "c", sequence: 2, role: null },
+    ]
+
+    const network = buildNetworkFromDatabase(
+      tables({ stops, routes: [route({ vehicle_class: "uv_express", flat_fare: 50 })], routeStops })
+    )
+    const result = findRoute(network, "a", "c", "cheapest")
+
+    expect(result?.steps).toHaveLength(1)
+    expect(result?.steps[0].fare).toBe(50)
+  })
+
   it("skips a route with fewer than two stops instead of throwing", () => {
     const stops: Stop[] = [stop({ id: "a" })]
     const routeStops: RouteStop[] = [{ id: "rs1", route_id: "route-a", stop_id: "a", sequence: 0, role: null }]
@@ -168,5 +258,64 @@ describe("buildNetworkFromDatabase", () => {
 
     expect(network.edges[0].roadPath).toHaveLength(2)
     expect(network.edges[0].distanceMeters).toBeGreaterThan(0)
+  })
+
+  // The OSM import carries ~70 long-haul coach routes that merely start at PITX (PITX-Davao,
+  // PITX-Tacloban). Their far terminals are real data but not commutable, and left in they blow up
+  // the map's initial fit and hand computeFare a 1500 km "segment".
+  it("drops stops outside the service area", () => {
+    const stops: Stop[] = [
+      stop({ id: "pitx", name: "PITX", lat: 14.51, lon: 120.99 }),
+      stop({ id: "davao", name: "Davao City Overland Transport Terminal", lat: 7.06, lon: 125.6 }),
+    ]
+    const routeStops: RouteStop[] = [
+      { id: "rs1", route_id: "route-a", stop_id: "pitx", sequence: 0, role: null },
+      { id: "rs2", route_id: "route-a", stop_id: "davao", sequence: 1, role: null },
+    ]
+
+    const network = buildNetworkFromDatabase(tables({ stops, routes: [route()], routeStops }))
+
+    expect(network.nodes.map((n) => n.id)).toEqual(["pitx"])
+    expect(network.edges).toHaveLength(0)
+  })
+
+  it("keeps the in-area hops of a route that leaves the service area", () => {
+    const stops: Stop[] = [
+      stop({ id: "a", name: "A", lat: 14.30, lon: 120.95 }),
+      stop({ id: "b", name: "B", lat: 14.35, lon: 120.97 }),
+      stop({ id: "far", name: "Far", lat: 13.14, lon: 123.74 }),
+    ]
+    const routeStops: RouteStop[] = [
+      { id: "rs1", route_id: "route-a", stop_id: "a", sequence: 0, role: null },
+      { id: "rs2", route_id: "route-a", stop_id: "b", sequence: 1, role: null },
+      { id: "rs3", route_id: "route-a", stop_id: "far", sequence: 2, role: null },
+    ]
+
+    const network = buildNetworkFromDatabase(tables({ stops, routes: [route()], routeStops }))
+
+    // a->b survives; b->far is the leg that leaves the region and is the only one dropped.
+    expect(network.edges.map((e) => [e.fromNodeId, e.toNodeId])).toEqual([["a", "b"]])
+  })
+})
+
+describe("selectableNodes", () => {
+  it("offers only named stops that a vehicle actually serves", () => {
+    const stops: Stop[] = [
+      stop({ id: "a", name: "A" }),
+      stop({ id: "b", name: "B" }),
+      // Real graph members, but not things a commuter can pick as an endpoint.
+      stop({ id: "nameless", name: "Unnamed stop" }),
+      stop({ id: "orphan", name: "Served by nothing" }),
+    ]
+    const routeStops: RouteStop[] = [
+      { id: "rs1", route_id: "route-a", stop_id: "a", sequence: 0, role: null },
+      { id: "rs2", route_id: "route-a", stop_id: "nameless", sequence: 1, role: null },
+      { id: "rs3", route_id: "route-a", stop_id: "b", sequence: 2, role: null },
+    ]
+
+    const network = buildNetworkFromDatabase(tables({ stops, routes: [route()], routeStops }))
+
+    expect(network.nodes).toHaveLength(4)
+    expect(selectableNodes(network).map((n) => n.id)).toEqual(["a", "b"])
   })
 })

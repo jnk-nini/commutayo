@@ -26,7 +26,14 @@
 //   route as unverified rather than reusing the pilot's doc-sourced grade by accident.
 
 import { computeFare, type VehicleClass } from "@/utils/fares"
-import { buildRouteGeometry, haversineMeters, projectOntoRoute, type LatLng } from "@/utils/geo"
+import {
+  buildRouteGeometry,
+  haversineMeters,
+  projectOntoRoute,
+  type LatLng,
+  type RouteGeometry as ProjectionIndex,
+  type RouteProjection,
+} from "@/utils/geo"
 import {
   findRoute,
   SPEED_KMH,
@@ -41,6 +48,41 @@ import { fetchTransitNetworkTables, type TransitNetworkTables } from "@/utils/tr
 import type { DbVehicleClass, Route, RouteGeometry as DbRouteGeometry, Stop } from "@/types/transit"
 
 export const DYNAMIC_NETWORK_ENABLED = import.meta.env.VITE_USE_DYNAMIC_NETWORK === "true"
+
+/**
+ * The box this app will actually plan trips inside: Cavite plus Metro Manila, with a margin.
+ *
+ * The OSM ingestion pulled every route relation touching the Cavite area, and a lot of them are
+ * long-haul provincial coaches that merely *start* at PITX -- PITX to Davao, to Tacloban, to
+ * Legazpi, and around 70 more. That data is real and correctly imported, but a 30-hour bus to
+ * Mindanao is not a commute, and leaving those stops in does three concrete kinds of damage: the
+ * map's initial fit zooms out to the whole country (the raw stop list spans 7.05N to 14.65N), the
+ * place pickers fill with terminals in Bicol and Samar, and `computeFare` gets handed a 1500 km
+ * "segment" whose distance-banded fare is meaningless.
+ *
+ * So the filter is a display and planning boundary, not a data cleanup: nothing is deleted, and
+ * widening the box is a one-line change here. An edge survives only if BOTH its stops are inside,
+ * which keeps every local hop of a long route (the PITX to Lucena runs contribute their Cavite and
+ * Manila legs normally) and drops only the legs that leave the region.
+ */
+export const SERVICE_AREA = {
+  minLat: 14.0,
+  maxLat: 14.85,
+  minLon: 120.55,
+  maxLon: 121.25,
+} as const
+
+/** Ingestion's placeholder for an OSM stop node carrying no name tag. Real in the graph, unpickable. */
+const PLACEHOLDER_STOP_NAME = "Unnamed stop"
+
+function isInServiceArea(stop: Stop): boolean {
+  return (
+    stop.lat >= SERVICE_AREA.minLat &&
+    stop.lat <= SERVICE_AREA.maxLat &&
+    stop.lon >= SERVICE_AREA.minLon &&
+    stop.lon <= SERVICE_AREA.maxLon
+  )
+}
 
 // Maps the DB's vehicle_class to the app's coarser TransitMode (what icon/speed applies) and to
 // fares.ts's VehicleClass (what fare bracket applies). `bus_premium` has no fare bracket of its
@@ -83,14 +125,22 @@ interface RoadSlice {
 }
 
 /**
- * Cuts the stretch of a route's stored polyline between two of its stops, by projecting each
- * stop onto the polyline (reusing the same nearest-point projection the live-tracking hook uses)
- * and slicing the vertices between the two projected positions. Falls back to a straight line
- * when there's no geometry yet, or the projections come out of order (bad/partial data) --
- * matching routingEngine.ts's `roadSegmentFor` fallback, so a gap in the data degrades instead of
- * throwing.
+ * Cuts the stretch of a route's stored polyline between two of its stops, given each stop's
+ * already-computed projection onto that polyline. Falls back to a straight line when there's no
+ * geometry yet, or the projections come out of order (bad/partial data) -- matching
+ * routingEngine.ts's `roadSegmentFor` fallback, so a gap in the data degrades instead of throwing.
+ *
+ * The projections are passed in rather than computed here because both of them are shared with the
+ * neighbouring segments: a stop is the drop-off of one edge and the boarding point of the next, so
+ * projecting per edge would do every interior stop twice. See `buildNetworkFromDatabase`.
  */
-function sliceRoadBetweenStops(from: Stop, to: Stop, polyline: LatLng[]): RoadSlice {
+function sliceRoadBetweenStops(
+  from: Stop,
+  to: Stop,
+  polyline: LatLng[],
+  fromProjection: RouteProjection | null,
+  toProjection: RouteProjection | null
+): RoadSlice {
   const fromCoord: LatLng = [from.lat, from.lon]
   const toCoord: LatLng = [to.lat, to.lon]
   const straightLine = (): RoadSlice => ({
@@ -99,10 +149,6 @@ function sliceRoadBetweenStops(from: Stop, to: Stop, polyline: LatLng[]): RoadSl
   })
 
   if (polyline.length < 2) return straightLine()
-
-  const geometry = buildRouteGeometry([{ path: polyline }])
-  const fromProjection = projectOntoRoute(geometry, fromCoord)
-  const toProjection = projectOntoRoute(geometry, toCoord)
   if (fromProjection === null || toProjection === null) return straightLine()
   if (toProjection.distanceTraveledMeters <= fromProjection.distanceTraveledMeters) return straightLine()
 
@@ -116,12 +162,12 @@ function sliceRoadBetweenStops(from: Stop, to: Stop, polyline: LatLng[]): RoadSl
   }
 }
 
-function buildEdge(route: Route, from: Stop, to: Stop, polyline: LatLng[]): RouteSegmentEdge {
+function buildEdge(route: Route, from: Stop, to: Stop, road: RoadSlice): RouteSegmentEdge {
   const mode = MODE_BY_VEHICLE_CLASS[route.vehicle_class]
   const vehicleClass = FARE_VEHICLE_CLASS_BY_VEHICLE_CLASS[route.vehicle_class]
-  const road = sliceRoadBetweenStops(from, to, polyline)
   const distanceKm = road.distanceMeters / 1000
-  const fare = route.flat_fare ?? computeFare(vehicleClass, distanceKm)
+  const flatFare = route.flat_fare
+  const fare = flatFare ?? computeFare(vehicleClass, distanceKm)
   const durationMin = Math.max(1, Math.round((distanceKm / SPEED_KMH[mode]) * 60))
   const placardText = route.ref ?? route.name
 
@@ -135,6 +181,10 @@ function buildEdge(route: Route, from: Stop, to: Stop, polyline: LatLng[]): Rout
     alternatePlacards: [],
     boardingSpot: from.waiting_spot ?? "",
     fare,
+    // Every segment of one DB route is one service (serviceId is route.id), so consecutive
+    // segments merge into a single ride -- and a route with `flat_fare` set must then charge that
+    // once for the whole ride, not per segment. See buildRouteResult's merge branch.
+    flatFare,
     durationMin,
     distanceMeters: road.distanceMeters,
     landmarkCues: [],
@@ -149,11 +199,22 @@ function buildEdge(route: Route, from: Stop, to: Stop, polyline: LatLng[]): Rout
 /**
  * Builds the routable graph from the raw DB rows. Directed, one edge per adjacent stop pair per
  * route, following `route_stops.sequence` -- see the file header for why this doesn't also
- * generate a reverse edge or a walking-first pass the way the pilot network does.
+ * generate a reverse edge or a walking-first pass the way the pilot network does. Stops outside
+ * `SERVICE_AREA` are excluded, and an edge needs both of its stops inside to survive.
+ *
+ * Two things are computed once per route rather than once per edge, which is what keeps this off
+ * the main thread long enough to matter. On the live Cavite data (342 routes, ~127k polyline
+ * points, ~2.4k edges) the naive per-edge version walked about 1.4 million polyline points; this
+ * shape walks roughly 580 thousand:
+ *   - the cumulative-distance index (`buildRouteGeometry`) is built once for the route's polyline,
+ *     not rebuilt for each of its segments;
+ *   - each stop is projected onto that polyline once, not once as a drop-off and again as the next
+ *     segment's boarding point.
  */
 export function buildNetworkFromDatabase(tables: TransitNetworkTables): TransitNetwork {
-  const nodes = tables.stops.map(stopToNode)
-  const stopsById = new Map(tables.stops.map((stop) => [stop.id, stop]))
+  const servedStops = tables.stops.filter(isInServiceArea)
+  const nodes = servedStops.map(stopToNode)
+  const stopsById = new Map(servedStops.map((stop) => [stop.id, stop]))
   const geometryByRoute = new Map<string, DbRouteGeometry>(tables.routeGeometries.map((g) => [g.route_id, g]))
 
   const stopSequenceByRoute = new Map<string, typeof tables.routeStops>()
@@ -173,15 +234,46 @@ export function buildNetworkFromDatabase(tables: TransitNetworkTables): TransitN
     if (sequence.length < 2) continue
 
     const polyline = geometryByRoute.get(route.id)?.path ?? []
+    const index: ProjectionIndex[] | null = polyline.length >= 2 ? buildRouteGeometry([{ path: polyline }]) : null
+
+    // One projection per distinct stop on this route, reused by both segments that touch it.
+    const projectionByStop = new Map<string, RouteProjection | null>()
+    const projectionFor = (stop: Stop): RouteProjection | null => {
+      if (index === null) return null
+      const cached = projectionByStop.get(stop.id)
+      if (cached !== undefined) return cached
+      const projection = projectOntoRoute(index, [stop.lat, stop.lon])
+      projectionByStop.set(stop.id, projection)
+      return projection
+    }
+
     for (let i = 0; i < sequence.length - 1; i++) {
       const from = stopsById.get(sequence[i].stop_id)
       const to = stopsById.get(sequence[i + 1].stop_id)
+      // A missing stop here means it was filtered out as outside the service area, so this leg
+      // leaves the region -- skip it and keep the rest of the route's local hops.
       if (from === undefined || to === undefined) continue
-      edges.push(buildEdge(route, from, to, polyline))
+      const road = sliceRoadBetweenStops(from, to, polyline, projectionFor(from), projectionFor(to))
+      edges.push(buildEdge(route, from, to, road))
     }
   }
 
   return { nodes, edges }
+}
+
+/**
+ * The stops worth offering in a place picker: ones a vehicle actually serves, and that have a real
+ * name to pick. Around 36 of the imported stops are unnamed OSM nodes and a handful more sit on no
+ * routable edge at all -- both are legitimate graph members (an unnamed node is still a point the
+ * road passes through) but neither is something a commuter can meaningfully choose as an endpoint.
+ */
+export function selectableNodes(network: TransitNetwork): TransitNode[] {
+  const served = new Set<string>()
+  for (const edge of network.edges) {
+    served.add(edge.fromNodeId)
+    served.add(edge.toNodeId)
+  }
+  return network.nodes.filter((node) => served.has(node.id) && node.name !== PLACEHOLDER_STOP_NAME)
 }
 
 /** Fetches the live tables and builds the graph. Throws if Supabase isn't configured. */
@@ -190,7 +282,14 @@ export async function loadDynamicNetwork(): Promise<TransitNetwork> {
   return buildNetworkFromDatabase(tables)
 }
 
-/** Same shape as routingEngine.ts's `findRoutes`, but async and over the live database network. */
+/**
+ * Same shape as routingEngine.ts's `findRoutes`, but async and over the live database network.
+ *
+ * Convenience for scripts and one-off checks only -- it re-reads and re-builds the entire network
+ * on every call. The UI must not use this: it loads the network once through
+ * `useDynamicTransitNetwork` and then calls the synchronous `findRoute(network, ...)` per priority,
+ * so switching a priority tab is instant instead of a fresh round trip to Supabase.
+ */
 export async function findRoutesDynamic(
   originId: string,
   destId: string

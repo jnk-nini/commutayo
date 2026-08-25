@@ -81,6 +81,22 @@ export function computeFare(vehicleClass: VehicleClass, distanceKm: number): num
   return roundToCash(rule.baseFare + extraKm * rule.perKm)
 }
 
+/**
+ * What riding `distanceKm` further on a vehicle already boarded adds to the fare. No base fare,
+ * because that was paid on boarding, and zero for anything priced flat.
+ *
+ * This is what the router costs a segment at when it continues the ride the commuter is already
+ * on. Charging a full `computeFare` there would price every intermediate stop as a fresh boarding
+ * and steer the "cheapest" search toward routes that are not actually cheapest. Deliberately not
+ * rounded to cash: it is a search weight, not a price anyone pays, and rounding it to whole pesos
+ * would flatten the distinction between short hops.
+ */
+export function marginalFare(vehicleClass: VehicleClass, distanceKm: number): number {
+  const rule = FARE_RULES[vehicleClass]
+  if (rule.flatFare !== undefined) return 0
+  return Math.max(0, distanceKm) * rule.perKm
+}
+
 // ---------------------------------------------------------------------------
 // Discounts
 // ---------------------------------------------------------------------------

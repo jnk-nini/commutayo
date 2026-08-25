@@ -1,7 +1,7 @@
 // Deterministic, weighted Dijkstra routing engine for the CommuTayo Cavite pilot corridor.
 // Source data: docs/cavite-network.md (Aguinaldo Highway corridor spec).
 
-import { computeFare, type VehicleClass } from "@/utils/fares"
+import { computeFare, marginalFare, type VehicleClass } from "@/utils/fares"
 import { haversineMeters } from "@/utils/geo"
 
 export type TransitMode = "jeepney" | "bus" | "uv_express" | "tricycle" | "walk"
@@ -53,6 +53,14 @@ export interface RouteSegmentEdge {
   /** Where to stand while waiting for this vehicle, copied from the boarding node. */
   boardingSpot: string
   fare: number
+  /**
+   * Set when this service charges one price for the whole ride regardless of distance, so merging
+   * consecutive segments of it must not re-price by kilometer. Null means the fare matrix applies.
+   *
+   * Only meaningful when segments actually merge (see `serviceId`), which is why it carries the
+   * *service's* pricing rule rather than this segment's computed `fare`.
+   */
+  flatFare: number | null
   durationMin: number
   /** Road distance in meters, from OSRM. Drives both the fare and the clock. */
   distanceMeters: number
@@ -461,6 +469,9 @@ function edgePair(spec: ServiceSpec): [RouteSegmentEdge, RouteSegmentEdge] {
     serviceId,
     alternatePlacards,
     fare,
+    // The matrix in fares.ts already prices uv_express and tricycle as flat by vehicle class, so
+    // the pilot has no per-service override to record here.
+    flatFare: null,
     durationMin,
     distanceMeters: road.distanceMeters,
   }
@@ -528,6 +539,9 @@ function walkEdgePair(fromId: string, toId: string, meters: number): [RouteSegme
     placardText: "",
     alternatePlacards: [],
     fare: 0,
+    // Walking is free however far it goes, and consecutive walks do merge, so this has to be flat
+    // rather than fall through to a per-kilometer recompute.
+    flatFare: 0,
     durationMin,
     distanceMeters: Math.round(meters),
   }
@@ -600,8 +614,24 @@ const WALK_PENALTY_MIN = 10
 
 type WeightFn = (edge: RouteSegmentEdge, previousServiceId: string | null) => number
 
-function cheapestWeight(edge: RouteSegmentEdge): number {
-  return edge.fare
+/**
+ * Costs a segment at what it actually adds to the bill: the full fare when it means boarding
+ * something, and only the per-kilometer increment when the commuter is already on that vehicle.
+ *
+ * Summing `edge.fare` unconditionally would charge a base fare at every intermediate stop, which
+ * made "cheapest" hunt for routes with few *segments* rather than few *boardings* -- on the live
+ * OSM network that produced the plainly wrong result of the cheapest tab (₱92) quoting more than
+ * the easiest tab (₱80). Mirrors how `buildRouteResult` prices a merged ride, so the number the
+ * search optimises and the number the commuter is shown are the same quantity.
+ *
+ * No effect on the pilot corridor: no two of its vehicle segments share a serviceId, so nothing
+ * ever continues a ride there and this always takes the full-fare branch.
+ */
+function cheapestWeight(edge: RouteSegmentEdge, previousServiceId: string | null): number {
+  const continuingRide = previousServiceId !== null && previousServiceId === edge.serviceId
+  if (!continuingRide) return edge.fare
+  if (edge.flatFare !== null) return 0
+  return marginalFare(edge.vehicleClass, edge.distanceMeters / 1000)
 }
 
 function fastestWeight(edge: RouteSegmentEdge): number {
@@ -836,9 +866,15 @@ function buildRouteResult(
       current.landmarkCues = edge.landmarkCues
       current.landmark = edge.landmarkCues.join("; ")
       current.landmarkVerified = current.landmarkVerified && edge.landmarkVerified
-      current.fare += edge.fare
       current.durationMin += edge.durationMin
       current.distanceMeters += edge.distanceMeters
+      // Re-price the whole ride off its accumulated distance instead of adding the segments'
+      // fares together. Each segment's own fare includes the base fare, and the base fare is paid
+      // once per boarding, not once per stop the vehicle passes -- summing them charged a 20-stop
+      // bus ride twenty base fares. Invisible on the pilot corridor, where no two segments share a
+      // serviceId so nothing merges, and glaring on the OSM network, where a whole route is one
+      // service: a PITX-Dasmariñas ride came out at ₱293 against a matrix fare of ₱92.
+      current.fare = edge.flatFare ?? computeFare(current.vehicleClass, current.distanceMeters / 1000)
       // Skip the road path's first point: it's the shared node the previous edge's road path
       // already ends on, and repeating it would draw a zero-length kink in the merged line.
       current.path.push(...edge.roadPath.slice(1))

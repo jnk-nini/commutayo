@@ -1,10 +1,15 @@
-// Interactive Cavite corridor map: renders the pilot node network, highlights the selected
+// Interactive Cavite map: renders the transit network's stops, highlights the selected
 // origin/destination, draws the active route as real road geometry (colored per transit mode), and
 // while a live trip is being tracked, redraws the ridden portion as done and follows the
 // commuter's GPS fix with a pulsing "you are here" marker.
+//
+// The stop layer has two modes, picked from the size of the network it is handed. The 7-stop pilot
+// corridor draws every stop as a full teardrop pin, exactly as before. The Cavite-wide network is
+// ~800 stops, where that would mean ~800 DOM nodes each holding an inline SVG, so those draw as
+// canvas circles gated by zoom and viewport instead. See StopLayer.
 
-import { Fragment, useEffect, useMemo } from "react"
-import { MapContainer, TileLayer, Marker, Popup, Polyline, Circle, useMap } from "react-leaflet"
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { MapContainer, TileLayer, Marker, Popup, Polyline, Circle, CircleMarker, useMap, useMapEvents } from "react-leaflet"
 import L from "leaflet"
 import "leaflet/dist/leaflet.css"
 
@@ -25,7 +30,7 @@ L.Icon.Default.mergeOptions({
 import type { LiveFix } from "@/hooks/useGeolocation"
 import type { TripProgress } from "@/hooks/useTripProgress"
 import { MODE_META } from "@/utils/presentation"
-import { CAVITE_PILOT_NODES, type RouteResult, type TransitMode } from "@/utils/routingEngine"
+import { CAVITE_PILOT_NODES, type RouteResult, type TransitMode, type TransitNode } from "@/utils/routingEngine"
 
 interface CommuterMapProps {
   originId: string | null
@@ -40,11 +45,22 @@ interface CommuterMapProps {
   progress?: TripProgress | null
   /** True while actively tracking: the map follows the live fix instead of fitting the whole route. */
   tracking?: boolean
+  /** Stops to draw. Defaults to the pilot corridor so this component isn't welded to one network. */
+  nodes?: TransitNode[]
 }
 
 // Midpoint of the corrected corridor, which now runs from Bacoor Longos down to Silang.
 const CAVITE_CENTER: [number, number] = [14.3512, 120.9449]
 const CAVITE_ZOOM = 11
+
+// Above this many stops, drawing every one as a teardrop DivIcon stops being viable and the layer
+// switches to canvas circles. The pilot corridor's 7 stay pins; the ~800-stop Cavite network does not.
+const PIN_MODE_MAX_STOPS = 40
+// Below this zoom only terminals draw, so a whole-province view is landmarks rather than a smear of
+// hundreds of dots that carries no information at that scale.
+const ALL_STOPS_ZOOM = 13
+// Hard ceiling per frame, after viewport culling. Reached only when zoomed out over a dense area.
+const MAX_RENDERED_STOPS = 300
 
 const CARTODB_LIGHT_URL = "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
 const CARTODB_DARK_URL = "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
@@ -115,12 +131,6 @@ function createLiveMarkerIcon(): L.DivIcon {
   return L.divIcon({ html, className: "", iconSize: [22, 22], iconAnchor: [11, 11] })
 }
 
-function pinStatusFor(nodeId: string, originId: string | null, destId: string | null): PinStatus {
-  if (nodeId === originId) return "origin"
-  if (nodeId === destId) return "destination"
-  return "default"
-}
-
 /**
  * Keeps the picked route in frame: fits the whole trip when it changes, and zooms to the single
  * leg the commuter has open in the result card. Without this the map sits at a fixed corridor
@@ -172,6 +182,138 @@ function FollowLiveLocation({ point, active }: { point: [number, number] | null;
   return null
 }
 
+/**
+ * Frames the whole network once, so opening the app shows the real coverage area instead of a
+ * hardcoded corridor centre that a Cavite-wide dataset has outgrown. Runs only while no route is
+ * picked, which is exactly when FitToRoute is inert, so the two can never fight over the camera.
+ */
+function FitToNetwork({ nodes, enabled }: { nodes: TransitNode[]; enabled: boolean }) {
+  const map = useMap()
+  const fittedTo = useRef<TransitNode[] | null>(null)
+
+  useEffect(() => {
+    if (!enabled || nodes.length === 0 || fittedTo.current === nodes) return
+    fittedTo.current = nodes
+
+    // Same one-tick delay and rationale as FitToRoute: a fitBounds issued in the map's setup tick
+    // is silently dropped, and the container may not have its final size until layout settles.
+    const timer = setTimeout(() => {
+      map.invalidateSize({ animate: false })
+      map.fitBounds(L.latLngBounds(nodes.map((node) => [node.lat, node.lng])), {
+        padding: [28, 28],
+        animate: false,
+      })
+    }, 0)
+    return () => clearTimeout(timer)
+  }, [map, nodes, enabled])
+
+  return null
+}
+
+/**
+ * Draws the stops, choosing per network size between full teardrop pins and canvas circles.
+ *
+ * For a big network the cost that matters is how many stops exist *in view*, not how many exist at
+ * all, so this tracks the viewport and renders only what is inside it. Origin and destination are
+ * always drawn as pins by the caller regardless of zoom, because losing sight of the two stops the
+ * trip is actually about would be the one genuinely disorienting thing this optimisation could do.
+ */
+function StopLayer({
+  nodes,
+  originId,
+  destId,
+  usePins,
+}: {
+  nodes: TransitNode[]
+  originId: string | null
+  destId: string | null
+  usePins: boolean
+}) {
+  const map = useMap()
+  const read = useCallback(() => ({ zoom: map.getZoom(), bounds: map.getBounds() }), [map])
+  const [view, setView] = useState(read)
+
+  useMapEvents({
+    moveend: () => setView(read()),
+    zoomend: () => setView(read()),
+  })
+
+  const visible = useMemo(() => {
+    // Endpoints are drawn separately and always; skip them here so they can't render twice.
+    const rest = nodes.filter((node) => node.id !== originId && node.id !== destId)
+    if (usePins) return rest
+
+    const terminalsOnly = view.zoom < ALL_STOPS_ZOOM
+    const inView = rest.filter(
+      (node) => (!terminalsOnly || node.isTerminal) && view.bounds.contains([node.lat, node.lng])
+    )
+    return inView.length > MAX_RENDERED_STOPS ? inView.slice(0, MAX_RENDERED_STOPS) : inView
+  }, [nodes, originId, destId, usePins, view])
+
+  if (usePins) {
+    return (
+      <>
+        {visible.map((node) => (
+          <Marker key={node.id} position={[node.lat, node.lng]} icon={createPinIcon("default", node.isTerminal)}>
+            <StopPopup node={node} status="default" />
+          </Marker>
+        ))}
+      </>
+    )
+  }
+
+  return (
+    <>
+      {visible.map((node) => (
+        <CircleMarker
+          key={node.id}
+          center={[node.lat, node.lng]}
+          radius={node.isTerminal ? 6 : 4}
+          pathOptions={{
+            color: "#ffffff",
+            weight: node.isTerminal ? 2 : 1.5,
+            opacity: 0.9,
+            fillColor: node.isTerminal ? "#b45309" : "#18181b",
+            fillOpacity: node.isTerminal ? 0.95 : 0.7,
+          }}
+        >
+          <StopPopup node={node} status="default" />
+        </CircleMarker>
+      ))}
+    </>
+  )
+}
+
+/** Popup body shared by both stop representations, so a pin and a circle say the same things. */
+function StopPopup({ node, status }: { node: TransitNode; status: PinStatus }) {
+  return (
+    <Popup className="commutayo-popup">
+      <div className="min-w-[180px] max-w-[240px]">
+        {/* OSM-imported stops carry no city, so this line is skipped rather than left blank. */}
+        {node.city.length > 0 && <p className="text-xs font-medium text-zinc-400">{node.city}</p>}
+        <p className="text-base font-bold leading-snug">{node.name}</p>
+        {node.isTerminal && node.city.length === 0 && (
+          <p className="text-xs font-medium text-zinc-400">Terminal</p>
+        )}
+        {status !== "default" && (
+          <span
+            className="mt-1.5 inline-block rounded-full px-2 py-0.5 text-xs font-semibold"
+            style={{ backgroundColor: PIN_FILL[status], color: "#fafafa" }}
+          >
+            {status === "origin" ? "Simula" : "Destinasyon"}
+          </span>
+        )}
+        {/* The pin marks a transit bay, not a building, so say what is actually there -- when the
+            data knows. The OSM import has no surveyed waiting spot, so it stays quiet instead of
+            printing an empty line where the pilot corridor had real instructions. */}
+        {node.waitingSpot.length > 0 && (
+          <p className="mt-2 text-xs leading-relaxed text-zinc-300">{node.waitingSpot}</p>
+        )}
+      </div>
+    </Popup>
+  )
+}
+
 interface SegmentPiece {
   key: string
   path: [number, number][]
@@ -190,8 +332,20 @@ export function CommuterMap({
   userFix = null,
   progress = null,
   tracking = false,
+  nodes = CAVITE_PILOT_NODES,
 }: CommuterMapProps) {
   const isTrackingLive = tracking && progress !== null && progress.onRoute
+  const usePins = nodes.length <= PIN_MODE_MAX_STOPS
+
+  // The two stops the trip is about, pulled out so they can be drawn as full pins unconditionally.
+  const endpoints = useMemo(
+    () =>
+      [
+        { node: nodes.find((n) => n.id === originId) ?? null, status: "origin" as const },
+        { node: nodes.find((n) => n.id === destId) ?? null, status: "destination" as const },
+      ].filter((entry): entry is { node: TransitNode; status: "origin" | "destination" } => entry.node !== null),
+    [nodes, originId, destId]
+  )
 
   // Each step carries its own real-road path, so a step that merges several segments still draws
   // as one continuous line. While a trip is tracked, the step under the live fix is split at the
@@ -264,10 +418,14 @@ export function CommuterMap({
         zoom={CAVITE_ZOOM}
         style={{ height: "100%", width: "100%" }}
         className="rounded-2xl"
+        // Routes the circle-marker stop layer and the route polylines through one canvas instead of
+        // an SVG element per shape. Pins stay DOM either way -- a DivIcon is HTML by definition.
+        preferCanvas
       >
         <TileLayer url={isDark ? CARTODB_DARK_URL : CARTODB_LIGHT_URL} attribution={CARTODB_ATTRIBUTION} />
 
         <FitToRoute route={activeRoute} activeStepIndex={activeStepIndex} disabled={isTrackingLive} />
+        <FitToNetwork nodes={nodes} enabled={activeRoute === null && !isTrackingLive} />
         <FollowLiveLocation point={livePoint} active={isTrackingLive} />
 
         {pieces.map((piece) => {
@@ -309,29 +467,18 @@ export function CommuterMap({
           )
         })}
 
-        {CAVITE_PILOT_NODES.map((node) => {
-          const status = pinStatusFor(node.id, originId, destId)
-          return (
-            <Marker key={node.id} position={[node.lat, node.lng]} icon={createPinIcon(status, node.isTerminal)}>
-              <Popup className="commutayo-popup">
-                <div className="min-w-[180px] max-w-[240px]">
-                  <p className="text-xs font-medium text-zinc-400">{node.city}</p>
-                  <p className="text-base font-bold leading-snug">{node.name}</p>
-                  {status !== "default" && (
-                    <span
-                      className="mt-1.5 inline-block rounded-full px-2 py-0.5 text-xs font-semibold"
-                      style={{ backgroundColor: PIN_FILL[status], color: "#fafafa" }}
-                    >
-                      {status === "origin" ? "Simula" : "Destinasyon"}
-                    </span>
-                  )}
-                  {/* The pin marks a transit bay, not a building, so say what is actually there. */}
-                  <p className="mt-2 text-xs leading-relaxed text-zinc-300">{node.waitingSpot}</p>
-                </div>
-              </Popup>
-            </Marker>
-          )
-        })}
+        <StopLayer nodes={nodes} originId={originId} destId={destId} usePins={usePins} />
+
+        {endpoints.map(({ node, status }) => (
+          <Marker
+            key={node.id}
+            position={[node.lat, node.lng]}
+            icon={createPinIcon(status, node.isTerminal)}
+            zIndexOffset={500}
+          >
+            <StopPopup node={node} status={status} />
+          </Marker>
+        ))}
 
         {userFix !== null && (
           <>

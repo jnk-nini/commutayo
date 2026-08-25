@@ -42,7 +42,11 @@ const OVERPASS_MIRRORS = [
   "https://overpass.openstreetmap.fr/api/interpreter",
 ]
 const OSRM_URL = "https://router.project-osrm.org/route/v1/driving"
-const CAVITE_AREA_QUERY = 'area["name"="Cavite"]["admin_level"="6"]["boundary"="administrative"]->.cavite;'
+// admin_level=4 verified directly against live Overpass data (returns the real Cavite boundary and
+// matching route relations); admin_level=6, tried briefly during an earlier outage on the theory
+// that PH provinces map to level 6, resolves to an empty area -- confirmed with a clean 200 and
+// zero elements, not a timeout, so that wasn't a flake. Keep this at 4.
+const CAVITE_AREA_QUERY = 'area["name"="Cavite"]["admin_level"="4"]["boundary"="administrative"]->.cavite;'
 const CACHE_PATH = path.join(__dirname, "..", "data", "raw_overpass_cache.json")
 
 // Evidence-based thresholds from the dedup/stitch prototype (see project research). Not guesses --
