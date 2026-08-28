@@ -577,13 +577,19 @@ function App() {
   return (
     <div className="bg-zinc-100 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-50">
       {isDesktop ? (
-        <div className="grid h-screen w-full grid-cols-[minmax(24rem,28rem)_minmax(0,1fr)]">
-          <aside className="flex h-screen min-w-0 flex-col overflow-y-auto border-r border-zinc-900/[0.07] bg-zinc-100 dark:border-white/10 dark:bg-zinc-950">
-            {header}
-            <div className="flex min-w-0 flex-1 flex-col items-center gap-4 px-4 pb-6">{planner}</div>
-          </aside>
+        <div className="relative h-screen w-full overflow-hidden">
+          <div className="absolute inset-0">{map}</div>
 
-          <div className="relative h-screen min-w-0">{map}</div>
+          {/* Floats over the map with a margin on every side, the same glass treatment the mobile
+              sheet uses, rather than a rigid sidebar that touches three edges of the screen. */}
+          <div className={cn("pointer-events-none absolute inset-y-4 left-4 flex w-full max-w-md flex-col", Z.header)}>
+            <div className={cn("pointer-events-auto flex min-h-0 flex-1 flex-col overflow-hidden", RADIUS.panel, GLASS_STRONG)}>
+              {header}
+              <div className="min-w-0 flex-1 overflow-y-auto">
+                <div className="flex min-w-0 flex-col items-center gap-4 px-4 pb-6">{planner}</div>
+              </div>
+            </div>
+          </div>
         </div>
       ) : (
         <div className="relative h-[100dvh] w-full overflow-hidden">
@@ -601,7 +607,20 @@ function App() {
             {header}
           </div>
 
-          <MobileSheet expanded={sheetExpanded} onExpandedChange={setSheetExpanded} reduceMotion={reduceMotion === true}>
+          <MobileSheet
+            expanded={sheetExpanded}
+            onExpandedChange={setSheetExpanded}
+            reduceMotion={reduceMotion === true}
+            peek={
+              activeRoute !== null && originId !== null && destId !== null ? (
+                <SheetPeekSummary
+                  route={activeRoute}
+                  originName={nodeNameById.get(originId) ?? originId}
+                  destName={nodeNameById.get(destId) ?? destId}
+                />
+              ) : null
+            }
+          >
             <div className="flex min-w-0 flex-col items-center gap-4 px-4 pb-[max(2rem,env(safe-area-inset-bottom))]">
               {planner}
             </div>
@@ -714,6 +733,10 @@ interface MobileSheetProps {
   expanded: boolean
   onExpandedChange: (expanded: boolean) => void
   reduceMotion: boolean
+  /** Shown instead of `children` while collapsed, if given -- a compact fare/time summary rather
+   *  than a cut-off search form. Null falls back to peeking at `children` itself (the empty-trip
+   *  state, where there's nothing to summarize yet). */
+  peek?: ReactNode
   children: ReactNode
 }
 
@@ -725,7 +748,7 @@ interface MobileSheetProps {
  * fight the sheet for the same gesture. The handle is also a real button, so the sheet is fully
  * operable without ever performing a drag.
  */
-function MobileSheet({ expanded, onExpandedChange, reduceMotion, children }: MobileSheetProps) {
+function MobileSheet({ expanded, onExpandedChange, reduceMotion, peek = null, children }: MobileSheetProps) {
   const sheetRef = useRef<HTMLDivElement>(null)
   const dragControls = useDragControls()
   const y = useMotionValue(0)
@@ -790,10 +813,76 @@ function MobileSheet({ expanded, onExpandedChange, reduceMotion, children }: Mob
         </motion.span>
       </button>
 
-      <div className={cn("min-h-0 flex-1 overscroll-contain", expanded ? "overflow-y-auto" : "overflow-hidden")}>
-        {children}
+      <div className={cn("relative min-h-0 flex-1 overscroll-contain", expanded ? "overflow-y-auto" : "overflow-hidden")}>
+        {/* Collapsed with a route on hand: a tap target showing what the full form is hidden
+            behind, instead of whatever happened to land in the form's first 236px. The form
+            itself stays mounted (just visually swapped out) so its state survives the toggle. */}
+        {!expanded && peek !== null && (
+          <button
+            type="button"
+            onClick={() => onExpandedChange(true)}
+            aria-label="Open the trip planner"
+            className={cn("absolute inset-x-0 top-0 z-10 text-left", FOCUS)}
+          >
+            {peek}
+          </button>
+        )}
+        <div className={!expanded && peek !== null ? "invisible" : undefined}>{children}</div>
       </div>
     </motion.div>
+  )
+}
+
+interface SheetPeekSummaryProps {
+  route: RouteResult
+  originName: string
+  destName: string
+}
+
+/** The sheet's collapsed face once a route exists: total fare, total time, transfer count, and a
+ *  puck per vehicle mode actually ridden -- everything a glance needs before tapping to expand. */
+function SheetPeekSummary({ route, originName, destName }: SheetPeekSummaryProps) {
+  const modesRidden = Array.from(new Set(route.steps.map((step) => step.mode)))
+
+  return (
+    <div className="flex w-full items-center gap-3 px-4 pb-4">
+      <div className="flex -space-x-2">
+        {modesRidden.map((mode) => {
+          const meta = MODE_META[mode]
+          return (
+            <span
+              key={mode}
+              className={cn(
+                "flex size-9 shrink-0 items-center justify-center rounded-full ring-2 ring-white dark:ring-zinc-900",
+                meta.puck
+              )}
+            >
+              <meta.Icon className={ICON.sm} aria-hidden />
+            </span>
+          )
+        })}
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-bold text-zinc-900 dark:text-zinc-50">
+          {originName} <span className="text-zinc-500 dark:text-zinc-400">&rarr;</span> {destName}
+        </p>
+        <p className="mt-0.5 flex items-center gap-1.5 truncate text-xs font-semibold text-zinc-600 dark:text-zinc-300">
+          <span className="truncate">
+            {formatPeso(route.totalFare)} &middot; {formatDuration(route.totalDurationMin)}
+          </span>
+          <span
+            className={cn(
+              "shrink-0 px-1.5 py-0.5 text-[11px] font-semibold ring-1",
+              RADIUS.pill,
+              "bg-zinc-900/5 text-zinc-600 ring-zinc-900/10 dark:bg-white/[0.06] dark:text-zinc-300 dark:ring-white/10"
+            )}
+          >
+            {route.transferCount === 0 ? "Direct" : `${route.transferCount} transfer${route.transferCount > 1 ? "s" : ""}`}
+          </span>
+        </p>
+      </div>
+      <ChevronUp className={cn(ICON.sm, "shrink-0 text-zinc-400 dark:text-zinc-500")} aria-hidden />
+    </div>
   )
 }
 

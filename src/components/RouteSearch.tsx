@@ -179,6 +179,7 @@ export function RouteSearch({
             id="route-search-origin"
             label="Starting point"
             Icon={MapPin}
+            tone="origin"
             nodes={nodes}
             value={originId}
             excludeId={destId}
@@ -192,6 +193,7 @@ export function RouteSearch({
             id="route-search-dest"
             label="Destination"
             Icon={Flag}
+            tone="destination"
             nodes={nodes}
             value={destId}
             excludeId={originId}

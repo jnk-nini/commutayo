@@ -8,10 +8,13 @@
 //              deliberate odd one out: a real jeepney signboard is a flat acrylic plate, and
 //              rounding it into a soft chip is what made it read as decoration instead of a sign.
 //
-//   COLOR      One interface accent, emerald. Every other hue in the app is *data*, not decoration:
-//              emerald marks a jeepney, amber a bus or UV Express, sky a tricycle, slate an on-foot
-//              leg. A commuter learns the code once and reuses it on the map, in the timeline and
-//              on the priority tabs. No accent is ever picked to make a surface look nicer.
+//   COLOR      Every hue in the app is *data*, not decoration: amber marks a jeepney, sky a bus,
+//              emerald a UV Express, violet a tricycle, slate an on-foot leg. A commuter learns the
+//              code once and reuses it on the map, in the timeline and in every fare pill. No accent
+//              is ever picked to make a surface look nicer. (Emerald is separately the app's own
+//              chrome accent -- focus rings, the wordmark, the "cheapest" tab -- which is a different
+//              system from the per-mode palette above and only shares emerald with UV Express by
+//              coincidence of the palette, not because the two mean the same thing.)
 //
 //   TYPE       Uppercase wide-tracked type means exactly one thing in this app: "this is painted on
 //              the vehicle". It is reserved for placards. Everything else, including form labels
@@ -112,38 +115,38 @@ export const MODE_META: Record<TransitMode, ModeMeta> = {
   jeepney: {
     label: "Jeepney",
     Icon: Truck,
-    hex: "#059669",
+    hex: "#F59E0B",
+    puck: "bg-amber-500/12 text-amber-800 ring-amber-600/25 dark:bg-amber-400/15 dark:text-amber-300 dark:ring-amber-400/30",
+    chip: "bg-amber-500/10 text-amber-800 ring-amber-600/20 dark:text-amber-300 dark:ring-amber-400/25",
+    rail: "bg-amber-600/30 dark:bg-amber-400/30",
+    railBorder: "border-amber-600/40 dark:border-amber-400/35",
+  },
+  bus: {
+    label: "Bus",
+    Icon: Bus,
+    hex: "#0EA5E9",
+    puck: "bg-sky-500/12 text-sky-700 ring-sky-600/25 dark:bg-sky-400/15 dark:text-sky-300 dark:ring-sky-400/30",
+    chip: "bg-sky-500/10 text-sky-700 ring-sky-600/20 dark:text-sky-300 dark:ring-sky-400/25",
+    rail: "bg-sky-600/30 dark:bg-sky-400/30",
+    railBorder: "border-sky-600/40 dark:border-sky-400/35",
+  },
+  uv_express: {
+    label: "UV Express",
+    Icon: CarFront,
+    hex: "#10B981",
     puck: "bg-emerald-500/12 text-emerald-700 ring-emerald-600/25 dark:bg-emerald-400/15 dark:text-emerald-300 dark:ring-emerald-400/30",
     chip: "bg-emerald-500/10 text-emerald-700 ring-emerald-600/20 dark:text-emerald-300 dark:ring-emerald-400/25",
     rail: "bg-emerald-600/30 dark:bg-emerald-400/30",
     railBorder: "border-emerald-600/40 dark:border-emerald-400/35",
   },
-  bus: {
-    label: "Bus",
-    Icon: Bus,
-    hex: "#b45309",
-    puck: "bg-amber-500/12 text-amber-800 ring-amber-600/25 dark:bg-amber-400/15 dark:text-amber-300 dark:ring-amber-400/30",
-    chip: "bg-amber-500/10 text-amber-800 ring-amber-600/20 dark:text-amber-300 dark:ring-amber-400/25",
-    rail: "bg-amber-600/30 dark:bg-amber-400/30",
-    railBorder: "border-amber-600/40 dark:border-amber-400/35",
-  },
-  uv_express: {
-    label: "UV Express",
-    Icon: CarFront,
-    hex: "#b45309",
-    puck: "bg-amber-500/12 text-amber-800 ring-amber-600/25 dark:bg-amber-400/15 dark:text-amber-300 dark:ring-amber-400/30",
-    chip: "bg-amber-500/10 text-amber-800 ring-amber-600/20 dark:text-amber-300 dark:ring-amber-400/25",
-    rail: "bg-amber-600/30 dark:bg-amber-400/30",
-    railBorder: "border-amber-600/40 dark:border-amber-400/35",
-  },
   tricycle: {
     label: "Tricycle",
     Icon: Bike,
-    hex: "#0369a1",
-    puck: "bg-sky-500/12 text-sky-800 ring-sky-600/25 dark:bg-sky-400/15 dark:text-sky-300 dark:ring-sky-400/30",
-    chip: "bg-sky-500/10 text-sky-800 ring-sky-600/20 dark:text-sky-300 dark:ring-sky-400/25",
-    rail: "bg-sky-600/30 dark:bg-sky-400/30",
-    railBorder: "border-sky-600/40 dark:border-sky-400/35",
+    hex: "#7C3AED",
+    puck: "bg-violet-500/12 text-violet-800 ring-violet-600/25 dark:bg-violet-400/15 dark:text-violet-300 dark:ring-violet-400/30",
+    chip: "bg-violet-500/10 text-violet-800 ring-violet-600/20 dark:text-violet-300 dark:ring-violet-400/25",
+    rail: "bg-violet-600/30 dark:bg-violet-400/30",
+    railBorder: "border-violet-600/40 dark:border-violet-400/35",
   },
   walk: {
     label: "Lakad",

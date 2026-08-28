@@ -59,6 +59,23 @@ type Option =
   | { kind: "stop"; node: TransitNode; matchedAlias: string | null }
   | { kind: "landmark"; node: TransitNode; label: string; context: string; meters: number }
 
+/**
+ * Which end of the trip this field picks. Purely a color identity -- green for where a commuter
+ * starts, red/orange for where they end up, matching the same two colors on the map's pins so the
+ * field a person is looking at and the pin it drops both read as the same place at a glance.
+ */
+export type PlaceTone = "origin" | "destination"
+
+const TONE_ICON: Record<PlaceTone, string> = {
+  origin: "text-emerald-600 dark:text-emerald-400",
+  destination: "text-red-600 dark:text-red-400",
+}
+
+const TONE_FOCUS: Record<PlaceTone, string> = {
+  origin: "focus-within:border-emerald-600/40 dark:focus-within:border-emerald-400/40",
+  destination: "focus-within:border-red-600/40 dark:focus-within:border-red-400/40",
+}
+
 export interface PlaceComboboxProps {
   id: string
   label: string
@@ -69,6 +86,8 @@ export interface PlaceComboboxProps {
   onChange: (nodeId: string) => void
   /** Excluded from results, so the origin can't also be offered as the destination. */
   excludeId?: string | null
+  /** Colors the field's icon and focus ring to match its pin on the map. */
+  tone: PlaceTone
   className?: string
 }
 
@@ -81,6 +100,7 @@ export function PlaceCombobox({
   value,
   onChange,
   excludeId = null,
+  tone,
   className,
 }: PlaceComboboxProps) {
   const listId = `${id}-listbox`
@@ -235,7 +255,7 @@ export function PlaceCombobox({
   return (
     <div ref={rootRef} onBlur={handleBlur} className={cn("relative", className)}>
       <label htmlFor={id} className="flex items-center gap-1.5 text-xs font-semibold text-zinc-600 dark:text-zinc-300">
-        <Icon className={cn(ICON.xs, "text-zinc-400 dark:text-zinc-500")} aria-hidden />
+        <Icon className={cn(ICON.xs, TONE_ICON[tone])} aria-hidden />
         {label}
       </label>
 
@@ -244,8 +264,9 @@ export function PlaceCombobox({
           "mt-1.5 flex h-11 items-center gap-2 px-3",
           RADIUS.control,
           "border border-zinc-900/10 bg-white/70 transition-colors duration-150",
-          "focus-within:border-emerald-600/40 focus-within:bg-white",
-          "dark:border-white/10 dark:bg-white/[0.06] dark:focus-within:border-emerald-400/40 dark:focus-within:bg-white/[0.09]"
+          "focus-within:bg-white",
+          TONE_FOCUS[tone],
+          "dark:border-white/10 dark:bg-white/[0.06] dark:focus-within:bg-white/[0.09]"
         )}
       >
         <input

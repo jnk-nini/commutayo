@@ -82,15 +82,18 @@ const TRAVELED_DASH = "1 7"
 
 type PinStatus = "origin" | "destination" | "default"
 
+// Deliberately not MODE_META: these mark trip *endpoints*, not vehicle type, so they need their
+// own fixed identity that never collides with (or gets relabeled by) the per-mode palette. Green
+// for "start", red for "end" is the convention every map app already teaches a commuter.
 const PIN_FILL: Record<PinStatus, string> = {
-  origin: MODE_META.jeepney.hex,
-  destination: "#b45309",
+  origin: "#059669",
+  destination: "#dc2626",
   default: "#18181b",
 }
 
 const PIN_HALO: Record<PinStatus, string> = {
   origin: "rgba(5, 150, 105, 0.25)",
-  destination: "rgba(180, 83, 9, 0.25)",
+  destination: "rgba(220, 38, 38, 0.25)",
   default: "rgba(24, 24, 27, 0.12)",
 }
 

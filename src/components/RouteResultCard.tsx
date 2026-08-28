@@ -600,9 +600,14 @@ function StepRow({ step, index, isExpanded, onToggle, onShowDriver, fareClass, s
                   </DetailRow>
                 </div>
 
-                {/* The line the commuter says out loud. This one earns its own elevated surface:
-                    it is the primary action on the whole card. */}
-                <div className={cn("px-3.5 py-3", RADIUS.control, "bg-zinc-900 text-zinc-50 dark:bg-zinc-800")}>
+                {/* The line the commuter says out loud. This one earns its own elevated surface --
+                    it is the primary action on the whole card -- plus a left accent in the leg's
+                    own mode colour, so the callout reads as "for this ride" even glanced at from
+                    across a jeepney. */}
+                <div
+                  className={cn("border-l-4 px-3.5 py-3", RADIUS.control, "bg-zinc-900 text-zinc-50 dark:bg-zinc-800")}
+                  style={{ borderLeftColor: mode.hex }}
+                >
                   <p className="flex items-center gap-1.5 text-xs font-semibold text-zinc-400">
                     <Megaphone className={ICON.xs} aria-hidden />
                     Say this to the driver
