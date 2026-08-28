@@ -1,7 +1,17 @@
 // One-off: fetches real road geometry for the gentri-dasma-jeepney custom route from the public
-// OSRM demo server (same source and RDP simplification as fetch-roads.mjs, adapted to a single
-// multi-waypoint request per direction instead of per-pair, since push-custom-routes.ts wants one
-// combined path per direction rather than a segment table).
+// OSRM demo server, per adjacent stop pair, then concatenates. Same source and RDP simplification
+// as fetch-roads.mjs (the pilot corridor's own script) -- and per-pair fetching for the same reason
+// that script does it that way, not as one multi-waypoint request for the whole route.
+//
+// That distinction mattered here, concretely: a single 6-point multi-waypoint request forced OSRM
+// to solve the *whole* route as one through-trip, and its whole-route optimizer routed Manggahan
+// Junction and LPU Cavite via a ~1.2km loop out toward Manggahan Junction and back rather than the
+// direct 1.1km local road that actually connects them -- confirmed by fetching that one pair on its
+// own, which came back clean and monotonic. The whole-route solve was choosing a *worse* path
+// between two of its own waypoints than the direct route between just those two points, almost
+// certainly because satisfying "visit every waypoint on one continuous drivable route" pulled in
+// one-way or turn-restriction constraints that a shorter, isolated pair query never has to satisfy.
+// Per-pair fetching sidesteps that entirely: each hop is its own locally-optimal request.
 //
 // Run: node scripts/fetch-gentri-dasma-geometry.mjs
 // Paste the two printed arrays into data/custom-routes/gentri-dasma-jeepney.json's "waypoints".
@@ -48,32 +58,45 @@ function simplify(points, epsilon) {
 
 const round6 = (n) => Number(n.toFixed(6))
 
-async function fetchDirection(stops, label) {
-  const coords = stops.map(([, lat, lng]) => `${lng},${lat}`).join(";")
-  const url = `https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson`
+async function fetchPair(fromName, fromCoord, toName, toCoord) {
+  const [fromLat, fromLng] = fromCoord
+  const [toLat, toLng] = toCoord
+  const url =
+    `https://router.project-osrm.org/route/v1/driving/` +
+    `${fromLng},${fromLat};${toLng},${toLat}?overview=full&geometries=geojson`
 
   const response = await fetch(url)
-  if (!response.ok) throw new Error(`${label}: HTTP ${response.status}`)
+  if (!response.ok) throw new Error(`${fromName} -> ${toName}: HTTP ${response.status}`)
   const body = await response.json()
-  if (body.code !== "Ok" || !body.routes?.length) throw new Error(`${label}: ${body.code} ${body.message ?? ""}`)
+  if (body.code !== "Ok" || !body.routes?.length) throw new Error(`${fromName} -> ${toName}: ${body.code}`)
 
   const route = body.routes[0]
   const raw = route.geometry.coordinates.map(([lng, lat]) => [round6(lat), round6(lng)])
-  // Pin every real stop onto the line at its actual coordinate, same reasoning as fetch-roads.mjs:
-  // the drawn line should start/end/pass exactly through the surveyed stop, not OSRM's road snap.
-  raw[0] = [stops[0][1], stops[0][2]]
-  raw[raw.length - 1] = [stops[stops.length - 1][1], stops[stops.length - 1][2]]
+  raw[0] = [fromLat, fromLng]
+  raw[raw.length - 1] = [toLat, toLng]
 
   const path = simplify(raw, EPSILON_DEG).map(([lat, lng]) => [round6(lat), round6(lng)])
   console.error(
-    `${label.padEnd(12)} ${String(Math.round(route.distance)).padStart(6)} m  ` +
-      `${String(raw.length).padStart(4)} -> ${String(path.length).padStart(3)} pts`
+    `  ${fromName} -> ${toName}: ${Math.round(route.distance)}m, ${raw.length} -> ${path.length} pts`
   )
   return path
 }
 
+async function fetchDirection(stops, label) {
+  console.error(`${label}:`)
+  let combined = []
+  for (let i = 0; i < stops.length - 1; i++) {
+    const [fromName, fromLat, fromLng] = stops[i]
+    const [toName, toLat, toLng] = stops[i + 1]
+    const segment = await fetchPair(fromName, [fromLat, fromLng], toName, [toLat, toLng])
+    // Drop the shared boundary point so consecutive segments don't duplicate a vertex.
+    combined = combined.length === 0 ? segment : [...combined, ...segment.slice(1)]
+    await new Promise((resolve) => setTimeout(resolve, 400)) // be polite to the demo server
+  }
+  return combined
+}
+
 const forward = await fetchDirection(FORWARD_STOPS, "SM DASMARIÑAS")
-await new Promise((resolve) => setTimeout(resolve, 400)) // be polite to the demo server
 const reverse = await fetchDirection([...FORWARD_STOPS].reverse(), "GENERAL TRIAS")
 
 const fmt = (path) => path.map(([lat, lng]) => `[${lat}, ${lng}]`).join(", ")
