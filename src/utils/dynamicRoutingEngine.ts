@@ -390,6 +390,25 @@ function normalizedStopName(name: string): string {
     .trim()
 }
 
+/**
+ * Survey-confirmed synonyms for two names OSM gave the same physical stop, further apart than
+ * `SPLIT_STOP_MERGE_METERS` would normally bridge. "SM City Dasmariñas" and "SM City Dasmariñas
+ * Transport Terminal" are 165m apart -- 15m past the 150m radius -- so a rider dropped at one was
+ * being routed away to the other for a onward ride that actually boards at both. This is a
+ * human-verified exception for one specific pair, not a wider radius: widening the radius globally
+ * risks fusing genuinely different places, which is exactly what `SPLIT_STOP_MERGE_METERS`'s own
+ * comment warns against.
+ */
+const FORCED_MERGE_ALIASES: ReadonlyMap<string, string> = new Map([
+  [normalizedStopName("SM City Dasmariñas Transport Terminal"), normalizedStopName("SM City Dasmariñas")],
+])
+const FORCED_MERGE_KEYS: ReadonlySet<string> = new Set(FORCED_MERGE_ALIASES.values())
+
+function mergeGroupKey(name: string): string {
+  const normalized = normalizedStopName(name)
+  return FORCED_MERGE_ALIASES.get(normalized) ?? normalized
+}
+
 /** One merged stop standing in for a cluster of kerbs, positioned at their centre. */
 function mergeCluster(cluster: Stop[]): Stop {
   if (cluster.length === 1) return cluster[0]
@@ -490,7 +509,7 @@ interface MergedStops {
 function mergeSplitStops(stops: Stop[]): MergedStops {
   const groups = new Map<string, Stop[]>()
   for (const stop of stops) {
-    const key = stop.name === PLACEHOLDER_STOP_NAME ? `id:${stop.id}` : normalizedStopName(stop.name)
+    const key = stop.name === PLACEHOLDER_STOP_NAME ? `id:${stop.id}` : mergeGroupKey(stop.name)
     const bucket = groups.get(key)
     if (bucket === undefined) groups.set(key, [stop])
     else bucket.push(stop)
@@ -498,8 +517,16 @@ function mergeSplitStops(stops: Stop[]): MergedStops {
 
   const merged: Stop[] = []
   const canonicalIdOf = new Map<string, string>()
-  for (const group of groups.values()) {
-    for (const cluster of clusterByProximity(group)) {
+  for (const [key, group] of groups) {
+    // A forced-alias group is asserted equal by survey, not by proximity, so it merges as one
+    // cluster outright rather than through clusterByProximity's distance gate -- that gate is what
+    // would otherwise keep these two apart, being 165m > SPLIT_STOP_MERGE_METERS. The spread guard
+    // still applies, purely as a sanity ceiling.
+    const clusters =
+      FORCED_MERGE_KEYS.has(key) && spreadMeters(group) <= SPLIT_STOP_SPREAD_METERS
+        ? [group]
+        : clusterByProximity(group)
+    for (const cluster of clusters) {
       const survivor = mergeCluster(cluster)
       merged.push(survivor)
       for (const stop of cluster) canonicalIdOf.set(stop.id, survivor.id)
