@@ -62,10 +62,14 @@ const ALL_STOPS_ZOOM = 13
 // Hard ceiling per frame, after viewport culling. Reached only when zoomed out over a dense area.
 const MAX_RENDERED_STOPS = 300
 
-const CARTODB_LIGHT_URL = "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
-const CARTODB_DARK_URL = "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
-const CARTODB_ATTRIBUTION =
-  '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+// The standard OSM tile server, not a third-party CDN: no API key, ever, for anyone running this
+// app. The tradeoff against the CartoDB tiles this replaced: OSM publishes one light style only
+// (dark mode below fakes a dark basemap with a CSS filter instead of loading real dark tiles), and
+// no {r} retina variant (phones get single-resolution tiles). Kept deliberately simple -- see
+// https://operations.osmfoundation.org/policies/tiles/ if this app's traffic ever grows enough to
+// need a dedicated tile provider again.
+const OSM_TILE_URL = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+const OSM_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
 
 // The portion of a leg already ridden fades to this neutral so the eye reads it as "done" rather
 // than as another mode color competing with what's still ahead.
@@ -404,7 +408,12 @@ export function CommuterMap({
         }
         ${
           isDark
-            ? ""
+            ? // OSM publishes one light style, no real dark tile set. Inverting it and rotating
+              // the hue back the way it came turns roads-and-labels-dark, everything-else-light
+              // into the reverse, a common trick for faking a dark basemap off a light-only
+              // source. Brightness pulled down slightly so it doesn't glare against the rest of
+              // the app's dark surfaces the way a raw inversion does.
+              `.leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(0.85) contrast(0.9); }`
             : `.leaflet-tile-pane { filter: saturate(0.7) brightness(0.97) contrast(0.96); }`
         }
         @keyframes commutayo-pulse {
@@ -425,7 +434,7 @@ export function CommuterMap({
         // an SVG element per shape. Pins stay DOM either way -- a DivIcon is HTML by definition.
         preferCanvas
       >
-        <TileLayer url={isDark ? CARTODB_DARK_URL : CARTODB_LIGHT_URL} attribution={CARTODB_ATTRIBUTION} />
+        <TileLayer url={OSM_TILE_URL} attribution={OSM_ATTRIBUTION} />
 
         <FitToRoute route={activeRoute} activeStepIndex={activeStepIndex} disabled={isTrackingLive} />
         <FitToNetwork nodes={nodes} enabled={activeRoute === null && !isTrackingLive} />

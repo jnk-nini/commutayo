@@ -82,6 +82,11 @@ export const Z = {
   sheet: "z-[1100]",
   drawer: "z-[1150]",
   toast: "z-[1200]",
+  /** A modal dialog outranks everything, including the toast: it demands an answer before
+   *  anything else on screen matters. The generic shadcn Dialog primitive ships with a bare
+   *  `z-50`, which is below even Leaflet's own panes (~800) -- that's what made the report dialog
+   *  open but render invisibly behind the map and header. See src/components/ui/dialog.tsx. */
+  modal: "z-[1300]",
 } as const
 
 /** Focus ring shared by every interactive element, so focus looks identical app-wide. */
